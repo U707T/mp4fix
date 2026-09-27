@@ -2,21 +2,12 @@ import 'package:flutter/material.dart';
 
 import '../app_scope.dart';
 import '../models.dart';
+import '../ui.dart';
 import '../widgets/job_tile.dart';
 
 /// 文件夹批量检测 / 修复（Android 走 SAF；桌面走普通目录）。
 class FolderPage extends StatelessWidget {
   const FolderPage({super.key});
-
-  Future<void> _guard(BuildContext context, Future<void> Function() action) async {
-    try {
-      await action();
-    } catch (e) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(describeError(e))));
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -24,23 +15,16 @@ class FolderPage extends StatelessWidget {
     final jobs = controller.jobsOf(JobSource.folder);
     final busy = controller.runningSource == JobSource.folder;
     final canRun = !controller.running;
+    final scheme = Theme.of(context).colorScheme;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('文件夹批量'),
-        actions: [
-          IconButton(
-            tooltip: '选择输出文件夹',
-            icon: const Icon(Icons.create_new_folder_rounded),
-            onPressed: canRun ? () => controller.pickOutputFolder() : null,
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text('文件夹批量')),
       body: Column(
         children: [
           Card(
             margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 ListTile(
                   dense: true,
@@ -53,7 +37,7 @@ class FolderPage extends StatelessWidget {
                   ),
                   trailing: TextButton(
                     onPressed: canRun
-                        ? () => controller.pickScanInputFolder()
+                        ? () => guardUi(context, controller.pickScanInputFolder)
                         : null,
                     child: const Text('选择'),
                   ),
@@ -69,29 +53,54 @@ class FolderPage extends StatelessWidget {
                   ),
                   trailing: TextButton(
                     onPressed: canRun
-                        ? () => controller.pickOutputFolder()
+                        ? () => guardUi(context, controller.pickOutputFolder)
                         : null,
                     child: const Text('选择'),
                   ),
                 ),
-                ListTile(
-                  dense: true,
-                  leading: const Icon(Icons.tune_rounded),
-                  title: const Text('判定阈值（最大交错距离）'),
-                  subtitle: const Text('几十~几百 MB 才是卡顿元凶；几百 KB 的不用管'),
-                  trailing: SegmentedButton<int>(
-                    showSelectedIcon: false,
-                    segments: const [
-                      ButtonSegment(value: 1, label: Text('1M')),
-                      ButtonSegment(value: 2, label: Text('2M')),
-                      ButtonSegment(value: 4, label: Text('4M')),
-                      ButtonSegment(value: 8, label: Text('8M')),
+                const Divider(height: 1),
+                // 阈值：不要塞进 ListTile.trailing（宽度会被挤爆，标题竖排）
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Icon(Icons.tune_rounded, size: 20),
+                          SizedBox(width: 12),
+                          Expanded(child: Text('判定阈值（最大交错距离）')),
+                        ],
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.only(left: 32, top: 4),
+                        child: Text(
+                          '几十~几百 MB 的交错才是卡顿元凶；几百 KB 的不用管',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: SegmentedButton<int>(
+                          showSelectedIcon: false,
+                          segments: const [
+                            ButtonSegment(value: 1, label: Text('1M')),
+                            ButtonSegment(value: 2, label: Text('2M')),
+                            ButtonSegment(value: 4, label: Text('4M')),
+                            ButtonSegment(value: 8, label: Text('8M')),
+                          ],
+                          selected: {controller.settings.thresholdMb},
+                          onSelectionChanged: canRun
+                              ? (values) => controller
+                                  .updateSettings((s) => s.thresholdMb = values.first)
+                              : null,
+                        ),
+                      ),
                     ],
-                    selected: {controller.settings.thresholdMb},
-                    onSelectionChanged: canRun
-                        ? (values) => controller.updateSettings(
-                            (s) => s.thresholdMb = values.first)
-                        : null,
                   ),
                 ),
                 SwitchListTile(
@@ -100,8 +109,8 @@ class FolderPage extends StatelessWidget {
                   subtitle: const Text('只缺 moov 前置的文件也一起处理（串流更顺）'),
                   value: controller.settings.includeOptimizable,
                   onChanged: canRun
-                      ? (v) => controller.updateSettings(
-                          (s) => s.includeOptimizable = v)
+                      ? (v) =>
+                          controller.updateSettings((s) => s.includeOptimizable = v)
                       : null,
                 ),
               ],
@@ -115,16 +124,16 @@ class FolderPage extends StatelessWidget {
               children: [
                 FilledButton.tonalIcon(
                   onPressed: canRun
-                      ? () => _guard(context,
-                          () => controller.scanFolder(fixAfterScan: false))
+                      ? () => guardUi(
+                          context, () => controller.scanFolder(fixAfterScan: false))
                       : null,
                   icon: const Icon(Icons.travel_explore_rounded),
                   label: const Text('仅扫描'),
                 ),
                 FilledButton.icon(
                   onPressed: canRun
-                      ? () => _guard(context,
-                          () => controller.scanFolder(fixAfterScan: true))
+                      ? () => guardUi(
+                          context, () => controller.scanFolder(fixAfterScan: true))
                       : null,
                   icon: const Icon(Icons.build_rounded),
                   label: const Text('扫描并修复'),
@@ -150,7 +159,8 @@ class FolderPage extends StatelessWidget {
                 ? const EmptyHint(
                     icon: Icons.folder_copy_rounded,
                     title: '递归检测整个文件夹',
-                    subtitle: '选择输入文件夹后点「仅扫描」只做体检；\n「扫描并修复」会把需重排的文件无损重排后写入输出文件夹',
+                    subtitle: '选择输入文件夹后点「仅扫描」只做体检；\n'
+                        '「扫描并修复」会把需重排的文件无损重排后写入输出文件夹',
                   )
                 : ListView.builder(
                     padding: const EdgeInsets.only(bottom: 96),

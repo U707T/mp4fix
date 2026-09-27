@@ -31,22 +31,58 @@ class FixResult {
 /// 阶段 / 进度回调：`('下载中', 0.42)`。
 typedef FixPhaseCallback = void Function(String phase, double progress);
 
+/// 修复执行器：把本地文件 [input] 无损重排为 [output]。
+///
+/// 默认实现直接调用同步引擎（CLI / 测试）；GUI 层应传入"在后台 Isolate 执行"
+/// 的实现，避免修复大文件时卡住界面。
+typedef WebDavRepairRunner =
+    Future<void> Function({
+      required File input,
+      required File output,
+      void Function(int done, int total)? onProgress,
+      bool Function()? isCancelled,
+    });
+
 /// "下载 → 无损重排修复 → 上传副本（原名_fixed.mp4）" 的完整流水线。
 ///
-/// 另提供只读用法 [fixToFile] / [fixToSink]：只下载，修复结果写到你给定的输出，
+/// 另提供只读用法 [fixToFile]：只下载，修复结果写到你给定的文件，
 /// 服务器不做任何写入，适合"下载到本地 → 自己手动上传"的流程。
 class WebDavFixer {
-  WebDavFixer(this.client, {required this.cacheDir});
+  WebDavFixer(this.client, {required this.cacheDir, WebDavRepairRunner? repair})
+    : _repair = repair ?? runRepairSync;
 
   final WebDavClient client;
   final Directory cacheDir;
+  final WebDavRepairRunner _repair;
+
+  static int _counter = 0;
+
+  /// 默认修复执行器：直接调用同步引擎（会阻塞调用线程）。
+  static Future<void> runRepairSync({
+    required File input,
+    required File output,
+    void Function(int done, int total)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final seekable = FileSeekableInput(input);
+    final sink = FileSyncSink(output.openSync(mode: FileMode.write));
+    try {
+      Mp4Repair.repair(
+        seekable,
+        sink,
+        isCancelled: isCancelled,
+        onProgress: onProgress,
+      );
+    } finally {
+      sink.close();
+      seekable.close();
+    }
+  }
 
   File _tempFile(String prefix) => File(
     '${cacheDir.path}/$prefix-${DateTime.now().microsecondsSinceEpoch}'
     '-${_counter++}.mp4',
   );
-
-  static int _counter = 0;
 
   /// 只读模式：下载原件 → 本地无损重排 → 写入 [output] 文件。
   ///
@@ -57,21 +93,53 @@ class WebDavFixer {
     FixPhaseCallback? onPhase,
     bool Function()? isCancelled,
   }) async {
-    output.parent.createSync(recursive: true);
-    final sink = FileSyncSink(output.openSync(mode: FileMode.write));
+    cacheDir.createSync(recursive: true);
+    final downloadFile = _tempFile('dl');
+    bool cancelled() => isCancelled?.call() ?? false;
     try {
-      return await fixToSink(
-        item,
-        sink,
-        onPhase: onPhase,
+      onPhase?.call('下载中', 0);
+      await client.download(
+        item.url,
+        downloadFile,
+        onProgress: (done, total) {
+          if (total > 0) onPhase?.call('下载中', done / total * 0.7);
+        },
+      );
+      if (cancelled()) return _cancelledResult();
+
+      onPhase?.call('修复中', 0.7);
+      output.parent.createSync(recursive: true);
+      await _repair(
+        input: downloadFile,
+        output: output,
         isCancelled: isCancelled,
+        onProgress: (done, total) {
+          if (total > 0) onPhase?.call('修复中', 0.7 + done / total * 0.3);
+        },
+      );
+      if (cancelled()) return _cancelledResult();
+
+      onPhase?.call('完成', 1);
+      return FixResult(
+        ok: true,
+        cancelled: false,
+        message: '已修复',
+        bytesWritten: output.existsSync() ? output.lengthSync() : 0,
+      );
+    } on RepairCancelledException {
+      return _cancelledResult();
+    } catch (e) {
+      return FixResult(
+        ok: false,
+        cancelled: false,
+        message: errorMessage(e),
       );
     } finally {
-      sink.close();
+      if (downloadFile.existsSync()) downloadFile.deleteSync();
     }
   }
 
-  /// 只读模式（通用输出汇）：下载 → 修复 → 写入 [output]。
+  /// 通用输出汇版本（同步引擎直接写出，适合测试 / 一次性写入）。
   Future<FixResult> fixToSink(
     ScanItem item,
     SyncSink output, {
@@ -155,21 +223,14 @@ class WebDavFixer {
 
       // 2）无损修复
       onPhase?.call('修复中', 0.45);
-      final input = FileSeekableInput(downloadFile);
-      final sink = FileSyncSink(fixedFile.openSync(mode: FileMode.write));
-      try {
-        Mp4Repair.repair(
-          input,
-          sink,
-          isCancelled: isCancelled,
-          onProgress: (p, total) {
-            if (total > 0) onPhase?.call('修复中', 0.45 + p / total * 0.3);
-          },
-        );
-      } finally {
-        sink.close();
-        input.close();
-      }
+      await _repair(
+        input: downloadFile,
+        output: fixedFile,
+        isCancelled: isCancelled,
+        onProgress: (done, total) {
+          if (total > 0) onPhase?.call('修复中', 0.45 + done / total * 0.3);
+        },
+      );
       if (cancelled()) return _cancelledResult();
 
       // 3）上传副本（唯一命名：原名_fixed.mp4 / 原名_fixed_2.mp4 …）
@@ -207,7 +268,8 @@ class WebDavFixer {
       // 4）校验
       onPhase?.call('校验中', 0.97);
       final st = await client.stat(target);
-      if (st == null || (st.size >= 0 && st.size != fixedFile.lengthSync())) {
+      if (st == null ||
+          (st.size >= 0 && st.size != fixedFile.lengthSync())) {
         await _quietDelete(target);
         return const FixResult(
           ok: false,

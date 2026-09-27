@@ -94,19 +94,25 @@ class _RepairArgs {
   final SendPort sendPort;
 }
 
-/// Isolate 入口：同步执行引擎，进度经 SendPort 回传。
+/// Isolate 入口：同步执行引擎，进度经 SendPort 回传（约 8 次/秒，避免端口刷屏）。
 void _repairWorker(_RepairArgs args) {
   final send = args.sendPort;
   SeekableInput? input;
   FileSyncSink? sink;
+  var lastSentMs = 0;
   try {
     input = FileSeekableInput(File(args.inputPath));
     sink = FileSyncSink(File(args.outputPath).openSync(mode: FileMode.write));
     final stats = Mp4Repair.repair(
       input,
       sink,
-      onProgress: (done, total) =>
-          send.send({'type': 'progress', 'done': done, 'total': total}),
+      onProgress: (done, total) {
+        final now = DateTime.now().millisecondsSinceEpoch;
+        if (done >= total || now - lastSentMs >= 120) {
+          lastSentMs = now;
+          send.send({'type': 'progress', 'done': done, 'total': total});
+        }
+      },
     );
     sink.close();
     sink = null;

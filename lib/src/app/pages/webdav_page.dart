@@ -13,17 +13,20 @@ class WebDavPage extends StatefulWidget {
 }
 
 class _WebDavPageState extends State<WebDavPage> {
-  late final TextEditingController _host;
-  late final TextEditingController _port;
-  late final TextEditingController _path;
-  late final TextEditingController _user;
-  late final TextEditingController _pass;
+  late TextEditingController _host;
+  late TextEditingController _port;
+  late TextEditingController _path;
+  late TextEditingController _user;
+  late TextEditingController _pass;
   bool _uploadCopies = true;
   String _status = '';
+  bool _seeded = false;
 
   @override
-  void initState() {
-    super.initState();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_seeded) return;
+    _seeded = true;
     final cfg = AppScope.of(context).settings.webdav;
     _host = TextEditingController(text: cfg.host);
     _port = TextEditingController(text: cfg.port);

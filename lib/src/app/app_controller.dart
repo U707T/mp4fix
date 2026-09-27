@@ -33,6 +33,19 @@ class AppController extends ChangeNotifier {
 
   JobSource? get runningSource => _runningSource;
 
+  /// 正在后台跑的那次修复（取消时立即中断）。
+  RepairTask? _activeRepair;
+
+  int _lastNotifyAt = 0;
+
+  /// 进度类更新最多 10 次/秒（避免 UI 重建风暴；状态变更仍即时通知）。
+  void _notifyThrottled() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (now - _lastNotifyAt < 100) return;
+    _lastNotifyAt = now;
+    notifyListeners();
+  }
+
   /// 是否有可修复的任务。
   bool hasFixable(JobSource source) =>
       jobs.any((j) => j.source == source && j.status.fixable);
@@ -103,10 +116,12 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 请求停止当前批处理。
+  /// 请求停止当前批处理（同时立即中断后台修复）。
   void requestCancel() {
     if (!running) return;
     _cancelRequested = true;
+    _activeRepair?.cancel();
+    _activeRepair = null;
     notifyListeners();
   }
 
@@ -117,6 +132,29 @@ class AppController extends ChangeNotifier {
   }
 
   String _message(Object e) => errorMessage(e);
+
+  /// 供 [WebDavFixer] 使用的修复执行器：在后台 Isolate 中跑引擎，避免卡住界面。
+  Future<void> _isolateRepair({
+    required File input,
+    required File output,
+    void Function(int done, int total)? onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final task = await RepairTask.start(
+      inputPath: input.path,
+      outputPath: output.path,
+      onProgress: onProgress,
+    );
+    _activeRepair = task;
+    try {
+      await task.done;
+    } catch (_) {
+      if (output.existsSync()) output.deleteSync();
+      rethrow;
+    } finally {
+      if (identical(_activeRepair, task)) _activeRepair = null;
+    }
+  }
 
   // ---------------------------------------------------------------- 输出目标
 
@@ -204,6 +242,7 @@ class AppController extends ChangeNotifier {
 
   /// 选择本地视频（多选）。
   Future<void> pickLocalFiles() async {
+    if (running) return;
     final files = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: const ['mp4', 'm4v', 'mov'],
@@ -276,7 +315,19 @@ class AppController extends ChangeNotifier {
   Future<void> scanFolder({bool fixAfterScan = false}) async {
     if (running) return;
     final targets = <FixJob>[];
+    try {
+      await _scanFolderInner(targets);
+    } finally {
+      // 无论成功 / 抛错 / 取消，都必须复位运行状态
+      if (_runningSource == JobSource.folder) _setRunning(null);
+    }
+    if (fixAfterScan && !_cancelRequested) {
+      await fixJobs(JobSource.folder, targets);
+    }
+  }
 
+  /// scanFolder 的实际工作（外层负责运行状态复位）。
+  Future<void> _scanFolderInner(List<FixJob> targets) async {
     if (AndroidPlatform.isSupported) {
       final tree = settings.scanInputTreeUri;
       if (tree == null || tree.isEmpty) {
@@ -353,11 +404,8 @@ class AppController extends ChangeNotifier {
       }
     }
 
-    _setRunning(null);
-    if (fixAfterScan && !_cancelRequested) {
-      await fixJobs(JobSource.folder, targets);
-    }
   }
+
 
   static bool _isVideoName(String name) {
     final dot = name.lastIndexOf('.');
@@ -497,7 +545,7 @@ class AppController extends ChangeNotifier {
     final client = _webDavClient();
     _setRunning(JobSource.webdav);
     final cache = await _cache();
-    final fixer = WebDavFixer(client, cacheDir: cache);
+    final fixer = WebDavFixer(client, cacheDir: cache, repair: _isolateRepair);
     try {
       await _ensureLocalNetworkPermission();
       final targets = jobs
@@ -519,7 +567,7 @@ class AppController extends ChangeNotifier {
             onPhase: (phase, progress) {
               job.message = '$phase ${(progress * 100).round()}%';
               job.progress = progress;
-              notifyListeners();
+              _notifyThrottled();
             },
             isCancelled: () => _cancelRequested,
           );
@@ -533,7 +581,7 @@ class AppController extends ChangeNotifier {
               onPhase: (phase, progress) {
                 job.message = '$phase ${(progress * 100).round()}%';
                 job.progress = progress;
-                notifyListeners();
+                _notifyThrottled();
               },
               isCancelled: () => _cancelRequested,
             );
@@ -617,7 +665,7 @@ class AppController extends ChangeNotifier {
               if (total > 0) {
                 job.progress = done / total;
                 job.message = '修复中 ${(job.progress * 100).round()}%';
-                notifyListeners();
+                _notifyThrottled();
               }
             },
           );

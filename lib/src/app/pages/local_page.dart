@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../app_scope.dart';
 import '../models.dart';
+import '../ui.dart';
 import '../widgets/job_tile.dart';
 
 /// 本地文件修复：多选视频 → 自动检测 → 一键修复 → 保存到输出文件夹。
@@ -20,10 +21,10 @@ class LocalPage extends StatelessWidget {
         actions: [
           IconButton(
             tooltip: '选择输出文件夹',
-            icon: const Icon(Icons.create_new_folder_rounded),
+            icon: const Icon(Icons.drive_folder_upload_rounded),
             onPressed: controller.running
                 ? null
-                : () => controller.pickOutputFolder(),
+                : () => guardUi(context, controller.pickOutputFolder),
           ),
         ],
       ),
@@ -64,14 +65,15 @@ class LocalPage extends StatelessWidget {
                     FilledButton.tonalIcon(
                       onPressed: controller.running
                           ? null
-                          : () => controller.pickLocalFiles(),
+                          : () => guardUi(context, controller.pickLocalFiles),
                       icon: const Icon(Icons.add_rounded),
                       label: const Text('添加视频'),
                     ),
                     FilledButton.icon(
                       onPressed: (!controller.running &&
                               controller.hasFixable(JobSource.local))
-                          ? () => controller.fixJobs(JobSource.local)
+                          ? () => guardUi(
+                              context, () => controller.fixJobs(JobSource.local))
                           : null,
                       icon: const Icon(Icons.build_rounded),
                       label: const Text('开始修复'),
