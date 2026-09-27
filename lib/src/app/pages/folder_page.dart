@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../app_controller.dart';
 import '../app_scope.dart';
 import '../models.dart';
 import '../ui.dart';
@@ -10,25 +11,18 @@ import '../widgets/ui_kit.dart';
 class FolderPage extends StatelessWidget {
   const FolderPage({super.key});
 
-  Future<void> _confirmClear(BuildContext context, void Function() clear) async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('清空列表？'),
-        content: const Text('会移除当前列表里的任务与检测结果（已保存的文件不受影响）。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('清空'),
-          ),
-        ],
+  /// 清空 → 直接执行 + 撤销入口（不再弹确认框）。
+  void _clearWithUndo(BuildContext context, AppController controller) {
+    final messenger = ScaffoldMessenger.of(context);
+    final removed = controller.jobsOf(JobSource.folder).length;
+    if (removed == 0) return;
+    controller.clearJobs(JobSource.folder);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('已清空 $removed 项'),
+        action: SnackBarAction(label: '撤销', onPressed: controller.undoClear),
       ),
     );
-    if (ok ?? false) clear();
   }
 
   @override
@@ -65,7 +59,7 @@ class FolderPage extends StatelessWidget {
               ),
               StatusStrip(
                 icon: Icons.save_alt_rounded,
-                text: controller.outputDescription,
+                text: controller.folderOutputDescription,
                 tone: controller.hasCustomOutput
                     ? StatusTone.good
                     : StatusTone.neutral,
@@ -144,16 +138,9 @@ class FolderPage extends StatelessWidget {
                 icon: const Icon(Icons.build_rounded),
                 label: const Text('扫描并修复'),
               ),
-              if (busy)
-                OutlinedButton.icon(
-                  onPressed: controller.requestCancel,
-                  icon: const Icon(Icons.stop_rounded),
-                  label: const Text('停止'),
-                ),
               if (!busy && jobs.isNotEmpty)
                 TextButton(
-                  onPressed: () => _confirmClear(
-                      context, () => controller.clearJobs(JobSource.folder)),
+                  onPressed: () => _clearWithUndo(context, controller),
                   child: const Text('清空'),
                 ),
             ],
@@ -162,6 +149,10 @@ class FolderPage extends StatelessWidget {
             jobs: jobs,
             active: busy ? controller.batchDone : null,
             total: busy ? controller.batchTotal : null,
+            onFixAll: canRun && controller.hasFixable(JobSource.folder)
+                ? () => guardUi(
+                    context, () => controller.fixJobs(JobSource.folder))
+                : null,
           ),
           if (controller.lastNotice != null)
             Padding(

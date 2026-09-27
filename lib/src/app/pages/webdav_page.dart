@@ -284,15 +284,22 @@ class _WebDavPageState extends State<WebDavPage> {
                     icon: const Icon(Icons.build_rounded),
                     label: const Text('扫描并修复'),
                   ),
-                  if (busy)
-                    OutlinedButton.icon(
-                      onPressed: controller.requestCancel,
-                      icon: const Icon(Icons.stop_rounded),
-                      label: const Text('停止'),
-                    ),
                   if (!busy && jobs.isNotEmpty)
                     TextButton(
-                      onPressed: () => controller.clearJobs(JobSource.webdav),
+                      onPressed: () {
+                        final messenger = ScaffoldMessenger.of(context);
+                        final removed = jobs.length;
+                        controller.clearJobs(JobSource.webdav);
+                        messenger.showSnackBar(
+                          SnackBar(
+                            content: Text('已清空 $removed 项'),
+                            action: SnackBarAction(
+                              label: '撤销',
+                              onPressed: controller.undoClear,
+                            ),
+                          ),
+                        );
+                      },
                       child: const Text('清空'),
                     ),
                 ],
@@ -313,6 +320,9 @@ class _WebDavPageState extends State<WebDavPage> {
             jobs: jobs,
             active: busy ? controller.batchDone : null,
             total: busy ? controller.batchTotal : null,
+            onFixAll: canRun && controller.hasFixable(JobSource.webdav)
+                ? () => _guard(() => controller.fixWebDavJobs())
+                : null,
           ),
           if (jobs.isEmpty)
             const Padding(

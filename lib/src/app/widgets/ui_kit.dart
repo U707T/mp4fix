@@ -168,6 +168,7 @@ class JobSummaryBar extends StatelessWidget {
     required this.jobs,
     this.active,
     this.total,
+    this.onFixAll,
   });
 
   final List<FixJob> jobs;
@@ -175,6 +176,9 @@ class JobSummaryBar extends StatelessWidget {
   /// 批量任务进行中：已处理 / 总数（用于总进度条）。
   final int? active;
   final int? total;
+
+  /// 一键修复"已有检测结果里可修复的那些"（**不重新扫描**）。
+  final VoidCallback? onFixAll;
 
   @override
   Widget build(BuildContext context) {
@@ -185,6 +189,7 @@ class JobSummaryBar extends StatelessWidget {
     int count(JobStatus s) => jobs.where((j) => j.status == s).length;
     final running = jobs.where((j) => j.status.busy).length;
     final pending = jobs.where((j) => j.status == JobStatus.pending).length;
+    final fixableCount = jobs.where((j) => j.status.fixable).length;
 
     final parts = <String>[
       '共 ${jobs.length}',
@@ -230,9 +235,26 @@ class JobSummaryBar extends StatelessWidget {
             ),
             const SizedBox(height: 6),
           ],
-          Text(
-            parts.join(' · '),
-            style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  parts.join(' · '),
+                  style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+              ),
+              if (onFixAll != null && fixableCount > 0) ...[
+                const SizedBox(width: Insets.gap),
+                FilledButton.tonalIcon(
+                  style: FilledButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: onFixAll,
+                  icon: const Icon(Icons.build_rounded, size: 18),
+                  label: Text('修复 $fixableCount 项'),
+                ),
+              ],
+            ],
           ),
         ],
       ),

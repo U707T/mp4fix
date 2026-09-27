@@ -163,11 +163,33 @@ class AppController extends ChangeNotifier {
     return job;
   }
 
+  /// 清空某来源的任务；被移除的内容会暂存，供 [undoClear] 撤销（界面用 SnackBar 撤销，
+  /// 不再弹确认框——少一步且不丢结果）。
+  ({List<FixJob> jobs, Map<String, ScanItem> items})? _cleared;
+
   void clearJobs(JobSource source) {
     if (_runningSource == source) return;
+    final removedJobs = jobs.where((j) => j.source == source).toList();
+    if (removedJobs.isEmpty) return;
+    final removedItems = <String, ScanItem>{
+      for (final j in removedJobs)
+        if (_webDavItems.containsKey(j.id)) j.id: _webDavItems[j.id]!,
+    };
+    _cleared = (jobs: removedJobs, items: removedItems);
     jobs.removeWhere((j) => j.source == source);
     _webDavItems.removeWhere((k, _) => !jobs.any((j) => j.id == k));
     notifyListeners();
+  }
+
+  /// 撤销上一次「清空」。
+  bool undoClear() {
+    final snapshot = _cleared;
+    if (snapshot == null) return false;
+    _cleared = null;
+    jobs.insertAll(0, snapshot.jobs);
+    _webDavItems.addAll(snapshot.items);
+    notifyListeners();
+    return true;
   }
 
   void removeJob(FixJob job) {
@@ -239,6 +261,27 @@ class AppController extends ChangeNotifier {
     final seg = segments.last;
     return seg.isEmpty ? treeUri : Uri.decodeComponent(seg);
   }
+
+  /// 文件夹任务的输出目标：**没选输出文件夹时就地覆盖输入文件夹**（少选一次目录）。
+  Future<OutputTarget> folderOutputTarget() async {
+    if (hasCustomOutput) return outputTarget();
+    if (AndroidPlatform.isSupported) {
+      final tree = settings.scanInputTreeUri;
+      if (tree != null && tree.isNotEmpty) {
+        return SafOutputTarget(tree, displayName: '${_treeName(tree)}（就地覆盖）');
+      }
+    } else {
+      final dir = settings.scanInputDirPath;
+      if (dir != null && dir.isNotEmpty && Directory(dir).existsSync()) {
+        return DirectoryOutputTarget(Directory(dir));
+      }
+    }
+    return outputTarget();
+  }
+
+  /// 文件夹页输出位置的展示文案。
+  String get folderOutputDescription =>
+      hasCustomOutput ? outputDescription : '未选择 → 就地覆盖输入文件夹（原文件会被替换）';
 
   /// 用户是否指定了输出文件夹（否则用默认位置）。
   bool get hasCustomOutput {
@@ -323,7 +366,9 @@ class AppController extends ChangeNotifier {
   // ---------------------------------------------------------------- 本地文件
 
   /// 选择本地视频（多选）。
-  Future<void> pickLocalFiles() async {
+  ///
+  /// [fixAfterPick] 为真时：检测完自动进入修复（「添加并修复」按钮，一次点击走完）。
+  Future<void> pickLocalFiles({bool fixAfterPick = false}) async {
     if (running) return;
     lastNotice = null;
     final files = await FilePicker.pickFiles(
@@ -353,7 +398,10 @@ class AppController extends ChangeNotifier {
       ));
     }
     if (created.isEmpty) return;
-    unawaited(_inspectLocalJobs(created));
+    await _inspectLocalJobs(created);
+    if (fixAfterPick && !_cancelRequested) {
+      await fixJobs(JobSource.local, created.where((j) => j.status.fixable).toList());
+    }
   }
 
   Future<void> _inspectLocalJobs(List<FixJob> targets) async {
@@ -751,7 +799,10 @@ class AppController extends ChangeNotifier {
     if (targets.isEmpty) return;
     _setRunning(source);
     _setBatch(targets.length);
-    final output = await outputTarget();
+    // 文件夹任务未指定输出时就地覆盖输入（其余来源用常规输出目标）
+    final output = source == JobSource.folder
+        ? await folderOutputTarget()
+        : await outputTarget();
     final cache = await _cache();
     try {
       for (var index = 0; index < targets.length; index++) {
