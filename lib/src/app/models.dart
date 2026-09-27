@@ -60,7 +60,7 @@ extension JobStatusX on JobStatus {
 }
 
 bool _hasErrno(String text, int errno) =>
-    RegExp('\\berrno = ' + errno.toString() + '\\b').hasMatch(text);
+    RegExp('\\berrno = $errno\\b').hasMatch(text);
 
 /// 统一的错误文案：常见 IO 错误给出可操作的中文提示，其余去掉异常类型前缀。
 String describeError(Object e) {
