@@ -105,7 +105,10 @@ jobs:
   # ---------------------------------------------------------------- 发布
   # 仅当 pubspec.yaml 的版本号尚无对应 tag 时创建 Release（普通提交只构建不发布）
   release:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # push 到 main 自动发布；手动 workflow_dispatch 也允许（便于补发）
+    if: |
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
