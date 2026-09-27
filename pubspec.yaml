@@ -9,6 +9,8 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # WebDAV 的 PROPFIND（multistatus）响应解析
+  xml: ^6.6.1
 
 dev_dependencies:
   flutter_test:

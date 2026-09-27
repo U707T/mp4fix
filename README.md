@@ -16,14 +16,20 @@
 
 ```
 lib/src/engine/     纯 Dart 无损修复引擎（零 Flutter 依赖）
-  seekable_input.dart   随机读取抽象：本地文件 / 内存（WebDAV Range 后续接入）
+  seekable_input.dart   随机读取抽象：本地文件 / 内存 / 预取（WebDAV）
   binary.dart           异常、无符号读写、同步输出汇（SyncSink）
   boxes.dart            MP4 盒子扫描
   mp4_inspect.dart      MP4 健康检测（结构 / 交错距离 / faststart / 分片识别）
   mp4_repair.dart       无损重排修复引擎
   engine.dart           对外 barrel
-bin/mp4fix_cli.dart      桌面命令行工具（修复 / 检测）
-test/                    引擎测试 + 与 Kotlin 旧引擎逐字节对齐的金标准测试
+lib/src/webdav/     WebDAV 扫描 / 修复流水线（纯 Dart，基于 dart:io HttpClient + xml）
+  webdav_client.dart    PROPFIND / GET(+Range) / PUT / DELETE / MOVE、Basic 认证、重定向、完整性校验
+  prefetch.dart         把"检测所需区域"（盒头 + moov）预取回内存 → 同步引擎可直接处理远程文件
+  webdav_scanner.dart   递归扫描 + 逐文件健康检测（不支持 Range 自动降级整档下载）
+  webdav_fixer.dart     下载 → 无损重排 → 上传副本 / 保存本地（服务器只读模式）
+bin/mp4fix_cli.dart      桌面命令行（修复 / 检测 / WebDAV 扫描与修复）
+tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器（联调用）
+test/                    引擎测试 + 金标准对齐测试 + WebDAV 端到端测试（25 项）
 ```
 
 ## 开发命令
@@ -33,20 +39,27 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（13 项）
-flutter test --no-pub test/kotlin_parity_test.dart   # 只跑与 Kotlin 引擎的对齐测试
+flutter test                     # 全部测试（25 项）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
 dart run bin/mp4fix_cli.dart 输入.mp4 输出.mp4
+dart run bin/mp4fix_cli.dart --dav-scan http://192.168.28.156:5244/dav --user admin --pass 密码
+dart run bin/mp4fix_cli.dart --dav-fix  http://192.168.28.156:5244/dav --user admin --pass 密码 --threshold 4
+
+# 本地联调：把某个目录用 WebDAV 暴露出来
+dart run tool/dav_dev_server.dart /tmp/videos 8080
 ```
 
 ## 进度（分阶段交付）
 
-- [x] **Phase ①：纯 Dart 引擎**（Mp4Inspect + Mp4Repair）+ 单元测试 + **与 Kotlin 引擎 MD5 逐字节对齐**（13 项测试全绿）
-- [ ] **Phase ②：WebDAV**（纯 Dart 客户端 / 扫描 / 修复流水线 + 本地迷你 DAV 服务器测试）
+- [x] **Phase ①：纯 Dart 引擎**（Mp4Inspect + Mp4Repair）+ 单元测试 + **与 Kotlin 引擎 MD5 逐字节对齐**
+- [x] **Phase ②：WebDAV**（客户端 / 预取检测 / 扫描 / 修复 + 迷你 DAV 服务器端到端测试；CLI 已可对真实服务器 `--dav-scan` / `--dav-fix`）
 - [ ] **Phase ③：UI 重构**（Material 3：任务列表 / 本地导入 / WebDAV / 设置 / 报告）
 - [ ] **Phase ④：Android 集成**（SAF 读写、Android 17 本地网络权限、缓存回退、debug 构建验证）+ CI
+
+> 当前测试：**25 项全绿**（引擎 10 + 金标准对齐 3 + WebDAV 12）。
+
 
 ## 与 Kotlin 版的差异
 
