@@ -33,6 +33,21 @@ class AppController extends ChangeNotifier {
   /// 最近一次操作的补充提示（如"跳过了 N 个无法读取的文件夹"）。
   String? lastNotice;
 
+  /// 批量进度（界面顶部的总进度条用）。
+  int batchDone = 0;
+  int batchTotal = 0;
+
+  void _setBatch(int total) {
+    batchTotal = total;
+    batchDone = 0;
+    notifyListeners();
+  }
+
+  void _tickBatch(int done) {
+    batchDone = done;
+    notifyListeners();
+  }
+
   bool get running => _runningSource != null;
 
   JobSource? get runningSource => _runningSource;
@@ -343,7 +358,9 @@ class AppController extends ChangeNotifier {
 
   Future<void> _inspectLocalJobs(List<FixJob> targets) async {
     _setRunning(targets.first.source);
-    for (final job in targets) {
+    _setBatch(targets.length);
+    for (var li = 0; li < targets.length; li++) {
+      final job = targets[li];
       if (_cancelRequested) break;
       final path = job.localPath;
       if (path == null) continue;
@@ -361,9 +378,12 @@ class AppController extends ChangeNotifier {
         job.status = JobStatus.error;
         job.message = _message(e);
       }
-      notifyListeners();
+      _tickBatch(li + 1);
     }
     _setRunning(null);
+    batchDone = 0;
+    batchTotal = 0;
+    notifyListeners();
   }
 
   void _applyReport(FixJob job, InspectReport report) {
@@ -443,11 +463,13 @@ class AppController extends ChangeNotifier {
       // 目录列举放到后台 Isolate：网络盘 / 大目录下 listSync 会把界面卡死；
       // 且逐个目录容忍失败（Windows 的 System Volume Information / junction 会拒绝访问）
       final listing = await Isolate.run(() => listVideosSync(dirPath));
+      _setBatch(listing.files.length);
       if (listing.skipped > 0) {
         lastNotice = '已跳过 ${listing.skipped} 个无法读取的文件夹（权限 / 系统目录）';
         notifyListeners();
       }
-      for (final f in listing.files) {
+      for (var li = 0; li < listing.files.length; li++) {
+        final f = listing.files[li];
         if (_cancelRequested) break;
         final job = _newJob(
           source: JobSource.folder,
@@ -469,7 +491,7 @@ class AppController extends ChangeNotifier {
           job.status = JobStatus.error;
           job.message = _message(err);
         }
-        notifyListeners();
+        _tickBatch(li + 1);
       }
     }
 
@@ -644,8 +666,10 @@ class AppController extends ChangeNotifier {
           jobs
               .where((j) => j.source == JobSource.webdav && j.status.fixable)
               .toList();
+      _setBatch(targets.length);
       final output = uploadCopies ? null : await outputTarget();
-      for (final job in targets) {
+      for (var wi = 0; wi < targets.length; wi++) {
+        final job = targets[wi];
         if (_cancelRequested) break;
         final item = _webDavItems[job.id];
         if (item == null) continue;
@@ -690,11 +714,14 @@ class AppController extends ChangeNotifier {
           }
         }
         job.progress = 0;
-        notifyListeners();
+        _tickBatch(wi + 1);
       }
     } finally {
       client.close();
       _setRunning(null);
+      batchDone = 0;
+      batchTotal = 0;
+      notifyListeners();
     }
   }
 
@@ -723,10 +750,12 @@ class AppController extends ChangeNotifier {
         jobs.where((j) => j.source == source && j.status.fixable).toList();
     if (targets.isEmpty) return;
     _setRunning(source);
+    _setBatch(targets.length);
     final output = await outputTarget();
     final cache = await _cache();
     try {
-      for (final job in targets) {
+      for (var index = 0; index < targets.length; index++) {
+        final job = targets[index];
         if (_cancelRequested) break;
         final inputPath = job.localPath;
         if (inputPath == null) {
@@ -781,10 +810,13 @@ class AppController extends ChangeNotifier {
           if (tmp.existsSync()) tmp.deleteSync();
         }
         job.progress = 0;
-        notifyListeners();
+        _tickBatch(index + 1);
       }
     } finally {
       _setRunning(null);
+      batchDone = 0;
+      batchTotal = 0;
+      notifyListeners();
     }
   }
 

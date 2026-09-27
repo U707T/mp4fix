@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../../engine/engine.dart';
 import '../app_scope.dart';
 import '../models.dart';
+import 'ui_kit.dart';
 
 /// 任务列表项：文件名 / 状态 / 说明 / 进度。
 class JobTile extends StatelessWidget {
@@ -14,13 +15,30 @@ class JobTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final controller = AppScope.of(context);
     final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
     final status = job.status;
+    final canRetry = (status.fixable ||
+            status == JobStatus.failed ||
+            status == JobStatus.cancelled) &&
+        !controller.running;
 
     return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      clipBehavior: Clip.antiAlias,
+      elevation: 0,
+      color: scheme.surfaceContainerLow,
+      margin: const EdgeInsets.symmetric(
+        horizontal: Insets.page,
+        vertical: 4,
+      ),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Insets.radius),
+      ),
       child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+        padding: const EdgeInsets.fromLTRB(
+          Insets.page,
+          Insets.card,
+          Insets.gap / 2,
+          Insets.card,
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -31,21 +49,19 @@ class JobTile extends StatelessWidget {
                     job.name,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontWeight: FontWeight.w600),
+                    style: text.titleSmall,
                   ),
                 ),
-                const SizedBox(width: 8),
-                _StatusChip(status: status),
-                if (!job.busy)
-                  IconButton(
-                    tooltip: '移除',
-                    visualDensity: VisualDensity.compact,
-                    icon: const Icon(Icons.close_rounded, size: 18),
-                    onPressed: () => controller.removeJob(job),
-                  ),
+                const SizedBox(width: Insets.gap),
+                StatusChip(status: status),
+                IconButton(
+                  tooltip: '从列表移除',
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.close_rounded, size: 18),
+                  onPressed: job.busy ? null : () => controller.removeJob(job),
+                ),
               ],
             ),
-            const SizedBox(height: 2),
             Text(
               [
                 if (job.displayPath.isNotEmpty) job.displayPath,
@@ -53,30 +69,28 @@ class JobTile extends StatelessWidget {
               ].join(' · '),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: 12,
-                color: scheme.onSurfaceVariant,
-              ),
+              style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
             ),
             if (job.message.isNotEmpty) ...[
               const SizedBox(height: 6),
-              Text(job.message, style: const TextStyle(fontSize: 12)),
-            ],
-            if (status.busy) ...[
-              const SizedBox(height: 8),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(4),
-                child: LinearProgressIndicator(
-                  value: job.progress > 0 ? job.progress : null,
-                  minHeight: 6,
+              Text(
+                job.message,
+                style: text.bodySmall?.copyWith(
+                  color: status.problematic ? scheme.error : null,
                 ),
               ),
             ],
-            if ((job.status.fixable ||
-                    job.status == JobStatus.failed ||
-                    job.status == JobStatus.cancelled) &&
-                !controller.running) ...[
-              const SizedBox(height: 6),
+            if (status.busy) ...[
+              const SizedBox(height: Insets.gap),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(3),
+                child: LinearProgressIndicator(
+                  value: job.progress > 0 ? job.progress : null,
+                  minHeight: 5,
+                ),
+              ),
+            ],
+            if (canRetry)
               Align(
                 alignment: Alignment.centerRight,
                 child: TextButton.icon(
@@ -84,10 +98,9 @@ class JobTile extends StatelessWidget {
                       ? controller.fixWebDavJobs(only: [job])
                       : controller.fixJobs(job.source, [job]),
                   icon: const Icon(Icons.build_rounded, size: 18),
-                  label: Text(job.status.fixable ? '修复这条' : '重试'),
+                  label: Text(status.fixable ? '修复这条' : '重试'),
                 ),
               ),
-            ],
           ],
         ),
       ),
@@ -95,8 +108,9 @@ class JobTile extends StatelessWidget {
   }
 }
 
-class _StatusChip extends StatelessWidget {
-  const _StatusChip({required this.status});
+/// 状态色芯片（配色统一在这里维护）。
+class StatusChip extends StatelessWidget {
+  const StatusChip({super.key, required this.status});
 
   final JobStatus status;
 
@@ -106,7 +120,9 @@ class _StatusChip extends StatelessWidget {
     final (bg, fg) = switch (status) {
       JobStatus.ok || JobStatus.saved || JobStatus.uploaded =>
         (scheme.primaryContainer, scheme.onPrimaryContainer),
-      JobStatus.needsFix || JobStatus.optimizable || JobStatus.fixing ||
+      JobStatus.needsFix ||
+      JobStatus.optimizable ||
+      JobStatus.fixing ||
       JobStatus.inspecting =>
         (scheme.tertiaryContainer, scheme.onTertiaryContainer),
       JobStatus.corrupt ||
@@ -124,41 +140,11 @@ class _StatusChip extends StatelessWidget {
       ),
       child: Text(
         status.label,
-        style: TextStyle(fontSize: 12, color: fg, fontWeight: FontWeight.w500),
-      ),
-    );
-  }
-}
-
-/// 空列表提示。
-class EmptyHint extends StatelessWidget {
-  const EmptyHint({super.key, required this.icon, required this.title, this.subtitle});
-
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-
-  @override
-  Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 48, color: scheme.outline),
-            const SizedBox(height: 12),
-            Text(title, style: Theme.of(context).textTheme.titleMedium),
-            if (subtitle != null) ...[
-              const SizedBox(height: 6),
-              Text(
-                subtitle!,
-                textAlign: TextAlign.center,
-                style: TextStyle(color: scheme.onSurfaceVariant, fontSize: 13),
-              ),
-            ],
-          ],
+        style: TextStyle(
+          fontSize: 12,
+          height: 1.2,
+          color: fg,
+          fontWeight: FontWeight.w500,
         ),
       ),
     );

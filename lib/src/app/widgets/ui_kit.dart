@@ -1,0 +1,282 @@
+import 'package:flutter/material.dart';
+
+import '../models.dart';
+
+/// 统一的界面度量（间距 / 圆角 / 图标尺寸）。
+///
+/// 四个页面此前各写各的 padding、字号、卡片样式 —— 这是"看着不协调"的根源。
+abstract final class Insets {
+  static const double page = 16;
+  static const double card = 12;
+  static const double gap = 8;
+  static const double gapLarge = 12;
+  static const double radius = 14;
+  static const double iconSmall = 16;
+  static const double icon = 20;
+}
+
+/// 页面里的分区卡片：统一的标题 + 内容 + 内边距。
+class SectionCard extends StatelessWidget {
+  const SectionCard({
+    super.key,
+    this.title,
+    this.icon,
+    this.trailing,
+    required this.children,
+    this.padding,
+  });
+
+  final String? title;
+  final IconData? icon;
+  final Widget? trailing;
+  final List<Widget> children;
+  final EdgeInsetsGeometry? padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    return Card(
+      elevation: 0,
+      color: scheme.surfaceContainerLow,
+      margin: const EdgeInsets.symmetric(
+        horizontal: Insets.page,
+        vertical: Insets.gap / 2,
+      ),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(Insets.radius),
+      ),
+      child: Padding(
+        padding: padding ??
+            const EdgeInsets.fromLTRB(
+              Insets.page,
+              Insets.card,
+              Insets.page,
+              Insets.card,
+            ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (title != null) ...[
+              Row(
+                children: [
+                  if (icon != null) ...[
+                    Icon(icon, size: Insets.icon, color: scheme.primary),
+                    const SizedBox(width: Insets.gapLarge),
+                  ],
+                  Expanded(
+                    child: Text(
+                      title!,
+                      style: text.titleSmall?.copyWith(color: scheme.primary),
+                    ),
+                  ),
+                  ?trailing,
+                ],
+              ),
+              const SizedBox(height: Insets.gapLarge),
+            ],
+            ...children,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 一行"当前状态 / 位置"信息（可点按触发动作）。
+class StatusStrip extends StatelessWidget {
+  const StatusStrip({
+    super.key,
+    required this.icon,
+    required this.text,
+    this.trailing,
+    this.onTap,
+    this.tone = StatusTone.neutral,
+  });
+
+  final IconData icon;
+  final String text;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+  final StatusTone tone;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final color = switch (tone) {
+      StatusTone.neutral => scheme.onSurfaceVariant,
+      StatusTone.good => scheme.primary,
+      StatusTone.warn => scheme.tertiary,
+      StatusTone.bad => scheme.error,
+    };
+    final row = Row(
+      children: [
+        Icon(icon, size: Insets.iconSmall, color: color),
+        const SizedBox(width: Insets.gap),
+        Expanded(
+          child: Text(
+            text,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(color: color),
+          ),
+        ),
+        ?trailing,
+      ],
+    );
+    if (onTap == null) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: row,
+      );
+    }
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(Insets.gap),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: row,
+      ),
+    );
+  }
+}
+
+enum StatusTone { neutral, good, warn, bad }
+
+/// 统一的按钮行：主操作在前，停止 / 清空等次级操作在后；窄屏自动换行。
+class ActionBar extends StatelessWidget {
+  const ActionBar({super.key, required this.actions});
+
+  final List<Widget> actions;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(Insets.page, Insets.gap, Insets.page, 0),
+    child: Wrap(
+      spacing: Insets.gap,
+      runSpacing: Insets.gap,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: actions,
+    ),
+  );
+}
+
+/// 任务汇总（按状态计数）+ 总进度。
+class JobSummaryBar extends StatelessWidget {
+  const JobSummaryBar({
+    super.key,
+    required this.jobs,
+    this.active,
+    this.total,
+  });
+
+  final List<FixJob> jobs;
+
+  /// 批量任务进行中：已处理 / 总数（用于总进度条）。
+  final int? active;
+  final int? total;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    if (jobs.isEmpty) return const SizedBox.shrink();
+
+    int count(JobStatus s) => jobs.where((j) => j.status == s).length;
+    final running = jobs.where((j) => j.status.busy).length;
+    final pending = jobs.where((j) => j.status == JobStatus.pending).length;
+
+    final parts = <String>[
+      '共 ${jobs.length}',
+      if (running > 0) '进行中 $running',
+      if (pending > 0) '待处理 $pending',
+      if (count(JobStatus.ok) > 0) '正常 ${count(JobStatus.ok)}',
+      if (count(JobStatus.needsFix) > 0) '需重排 ${count(JobStatus.needsFix)}',
+      if (count(JobStatus.optimizable) > 0) '可优化 ${count(JobStatus.optimizable)}',
+      if (count(JobStatus.saved) + count(JobStatus.uploaded) > 0)
+        '已完成 ${count(JobStatus.saved) + count(JobStatus.uploaded)}',
+      if (count(JobStatus.corrupt) +
+              count(JobStatus.unsupported) +
+              count(JobStatus.error) +
+              count(JobStatus.failed) >
+          0)
+        '问题 ${count(JobStatus.corrupt) + count(JobStatus.unsupported) + count(JobStatus.error) + count(JobStatus.failed)}',
+    ];
+
+    final showProgress = active != null && total != null && total! > 0;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(Insets.page, Insets.gap, Insets.page, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (showProgress) ...[
+            Row(
+              children: [
+                Expanded(
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(3),
+                    child: LinearProgressIndicator(
+                      value: (active! / total!).clamp(0.0, 1.0),
+                      minHeight: 4,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: Insets.gap),
+                Text('$active/$total',
+                    style: text.labelSmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    )),
+              ],
+            ),
+            const SizedBox(height: 6),
+          ],
+          Text(
+            parts.join(' · '),
+            style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 空状态（统一图标 / 文案 / 间距）。
+class EmptyHint extends StatelessWidget {
+  const EmptyHint({
+    super.key,
+    required this.icon,
+    required this.title,
+    this.subtitle,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(Insets.page * 2),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 44, color: scheme.outline),
+            const SizedBox(height: Insets.gapLarge),
+            Text(title, style: text.titleSmall),
+            if (subtitle != null) ...[
+              const SizedBox(height: 6),
+              Text(
+                subtitle!,
+                textAlign: TextAlign.center,
+                style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
