@@ -37,6 +37,13 @@ class _AppRoot extends StatelessWidget {
         GlobalWidgetsLocalizations.delegate,
         GlobalCupertinoLocalizations.delegate,
       ],
+      // 系统字号很大时限制放大上限，避免表单被撑到一屏放不下
+      // （工具类界面：1.0~1.25 倍之间跟随系统）
+      builder: (context, child) => MediaQuery.withClampedTextScaling(
+        minScaleFactor: 1.0,
+        maxScaleFactor: 1.25,
+        child: child!,
+      ),
       home: const HomeShell(),
     );
   }

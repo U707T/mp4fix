@@ -78,6 +78,10 @@ class FolderPage extends StatelessWidget {
           SectionCard(
             title: '判定规则',
             icon: Icons.tune_rounded,
+            collapsible: true,
+            initiallyExpanded: false,
+            summary: '阈值 ${controller.settings.thresholdMb} MB'
+                ' · ${controller.settings.includeOptimizable ? '含可优化' : '不含可优化'}',
             children: [
               Text(
                 '最大交错距离超过阈值即视为「需重排」；几十~几百 MB 才是卡顿元凶，几百 KB 的不用管。',

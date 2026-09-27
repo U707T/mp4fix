@@ -16,7 +16,10 @@ abstract final class Insets {
 }
 
 /// 页面里的分区卡片：统一的标题 + 内容 + 内边距。
-class SectionCard extends StatelessWidget {
+///
+/// [collapsible] 为真时标题行可点按展开/收起；收起状态只显示一行 [summary] ——
+/// 表单类内容默认收起，避免整页被"摊开"得又长又要滚。
+class SectionCard extends StatefulWidget {
   const SectionCard({
     super.key,
     this.title,
@@ -24,6 +27,9 @@ class SectionCard extends StatelessWidget {
     this.trailing,
     required this.children,
     this.padding,
+    this.collapsible = false,
+    this.summary,
+    this.initiallyExpanded = true,
   });
 
   final String? title;
@@ -31,11 +37,23 @@ class SectionCard extends StatelessWidget {
   final Widget? trailing;
   final List<Widget> children;
   final EdgeInsetsGeometry? padding;
+  final bool collapsible;
+  final String? summary;
+  final bool initiallyExpanded;
+
+  @override
+  State<SectionCard> createState() => _SectionCardState();
+}
+
+class _SectionCardState extends State<SectionCard> {
+  late bool _expanded = widget.initiallyExpanded || !widget.collapsible;
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final text = Theme.of(context).textTheme;
+    final showBody = _expanded || !widget.collapsible;
+
     return Card(
       elevation: 0,
       color: scheme.surfaceContainerLow,
@@ -47,7 +65,7 @@ class SectionCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(Insets.radius),
       ),
       child: Padding(
-        padding: padding ??
+        padding: widget.padding ??
             const EdgeInsets.fromLTRB(
               Insets.page,
               Insets.card,
@@ -57,25 +75,52 @@ class SectionCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (title != null) ...[
-              Row(
-                children: [
-                  if (icon != null) ...[
-                    Icon(icon, size: Insets.icon, color: scheme.primary),
-                    const SizedBox(width: Insets.gapLarge),
-                  ],
-                  Expanded(
-                    child: Text(
-                      title!,
-                      style: text.titleSmall?.copyWith(color: scheme.primary),
-                    ),
+            if (widget.title != null)
+              InkWell(
+                onTap: widget.collapsible
+                    ? () => setState(() => _expanded = !_expanded)
+                    : null,
+                borderRadius: BorderRadius.circular(Insets.gap),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: Row(
+                    children: [
+                      if (widget.icon != null) ...[
+                        Icon(widget.icon, size: Insets.icon, color: scheme.primary),
+                        const SizedBox(width: Insets.gapLarge),
+                      ],
+                      Expanded(
+                        child: Text(
+                          widget.title!,
+                          style: text.titleSmall?.copyWith(color: scheme.primary),
+                        ),
+                      ),
+                      ?widget.trailing,
+                      if (widget.collapsible)
+                        Icon(
+                          showBody
+                              ? Icons.expand_less_rounded
+                              : Icons.expand_more_rounded,
+                          size: Insets.icon,
+                          color: scheme.onSurfaceVariant,
+                        ),
+                    ],
                   ),
-                  ?trailing,
-                ],
+                ),
               ),
-              const SizedBox(height: Insets.gapLarge),
-            ],
-            ...children,
+            if (showBody) ...[
+              if (widget.title != null) const SizedBox(height: Insets.gapLarge),
+              ...widget.children,
+            ] else if (widget.summary != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  widget.summary!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+                ),
+              ),
           ],
         ),
       ),

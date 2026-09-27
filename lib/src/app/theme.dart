@@ -12,8 +12,13 @@ ThemeData buildTheme(Brightness brightness) {
   return ThemeData(
     colorScheme: scheme,
     useMaterial3: true,
-    visualDensity: VisualDensity.adaptivePlatformDensity,
-    appBarTheme: const AppBarTheme(centerTitle: false),
+    // 工具类应用：整体收紧一档密度（控件更矮、更紧凑），避免"UI 太大"
+    visualDensity: VisualDensity.compact,
+    appBarTheme: const AppBarTheme(
+      centerTitle: false,
+      titleTextStyle: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
+      toolbarHeight: 52,
+    ),
     snackBarTheme: const SnackBarThemeData(
       behavior: SnackBarBehavior.floating,
     ),

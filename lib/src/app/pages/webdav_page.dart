@@ -76,6 +76,29 @@ class _WebDavPageState extends State<WebDavPage> {
           SectionCard(
             title: '服务器',
             icon: Icons.cloud_rounded,
+            collapsible: true,
+            initiallyExpanded: _pass.text.isEmpty,
+            summary: '${cfg.host}:${cfg.port}${cfg.path}'
+                ' · ${cfg.user.isEmpty ? '未填用户名' : cfg.user}'
+                ' · ${_pass.text.isEmpty ? '未填密码' : '密码已填'}',
+            trailing: canRun
+                ? TextButton(
+                    onPressed: () => _guard(() async {
+                          setState(() {
+                            _status = '正在测试连接…';
+                            _statusTone = StatusTone.neutral;
+                          });
+                          final msg = await controller.testWebDavConnection();
+                          if (mounted) {
+                            setState(() {
+                              _status = msg;
+                              _statusTone = StatusTone.good;
+                            });
+                          }
+                        }),
+                    child: const Text('测试'),
+                  )
+                : null,
             children: [
               Row(
                 children: [
@@ -178,12 +201,6 @@ class _WebDavPageState extends State<WebDavPage> {
                   ),
                 ],
               ),
-              const SizedBox(height: Insets.gap),
-              StatusStrip(
-                icon: Icons.link_rounded,
-                text: '将连接 ${cfg.url}',
-                tone: StatusTone.neutral,
-              ),
             ],
           ),
           SectionCard(
@@ -209,11 +226,12 @@ class _WebDavPageState extends State<WebDavPage> {
                     ? (v) => setState(() => _uploadCopies = v.first)
                     : null,
               ),
-              const SizedBox(height: 6),
               Text(
                 _uploadCopies
-                    ? '在服务器上生成「原名_fixed.mp4」副本，原文件不动。'
-                    : '服务器全程只读（只有 GET/PROPFIND），产物保存到：${controller.outputDescription.replaceFirst('输出：', '')}',
+                    ? '在服务器生成「原名_fixed.mp4」副本（原文件不动）'
+                    : '服务器只读（GET/PROPFIND）· 产物存到 ${controller.outputDescription.replaceFirst('输出：', '')}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: Theme.of(context).colorScheme.onSurfaceVariant,
                     ),
@@ -223,45 +241,6 @@ class _WebDavPageState extends State<WebDavPage> {
                 spacing: Insets.gap,
                 runSpacing: Insets.gap,
                 children: [
-                  OutlinedButton.icon(
-                    onPressed: canRun
-                        ? () => _guard(() async {
-                              setState(() {
-                                _status = '正在测试连接…';
-                                _statusTone = StatusTone.neutral;
-                              });
-                              final msg =
-                                  await controller.testWebDavConnection();
-                              if (mounted) {
-                                setState(() {
-                                  _status = msg;
-                                  _statusTone = StatusTone.good;
-                                });
-                              }
-                            })
-                        : null,
-                    icon: const Icon(Icons.wifi_tethering_rounded),
-                    label: const Text('测试连接'),
-                  ),
-                  FilledButton.tonalIcon(
-                    onPressed: canRun
-                        ? () => _guard(() async {
-                              setState(() {
-                                _status = '扫描中…';
-                                _statusTone = StatusTone.neutral;
-                              });
-                              await controller.scanWebDav(fixAfterScan: false);
-                              if (mounted) {
-                                setState(() {
-                                  _status = '扫描完成';
-                                  _statusTone = StatusTone.good;
-                                });
-                              }
-                            })
-                        : null,
-                    icon: const Icon(Icons.travel_explore_rounded),
-                    label: const Text('仅扫描'),
-                  ),
                   FilledButton.icon(
                     onPressed: canRun
                         ? () => _guard(() async {
@@ -283,6 +262,25 @@ class _WebDavPageState extends State<WebDavPage> {
                         : null,
                     icon: const Icon(Icons.build_rounded),
                     label: const Text('扫描并修复'),
+                  ),
+                  FilledButton.tonalIcon(
+                    onPressed: canRun
+                        ? () => _guard(() async {
+                              setState(() {
+                                _status = '扫描中…';
+                                _statusTone = StatusTone.neutral;
+                              });
+                              await controller.scanWebDav(fixAfterScan: false);
+                              if (mounted) {
+                                setState(() {
+                                  _status = '扫描完成';
+                                  _statusTone = StatusTone.good;
+                                });
+                              }
+                            })
+                        : null,
+                    icon: const Icon(Icons.travel_explore_rounded),
+                    label: const Text('仅扫描'),
                   ),
                   if (!busy && jobs.isNotEmpty)
                     TextButton(
