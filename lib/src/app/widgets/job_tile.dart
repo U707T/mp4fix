@@ -80,7 +80,9 @@ class JobTile extends StatelessWidget {
               Align(
                 alignment: Alignment.centerRight,
                 child: TextButton.icon(
-                  onPressed: () => controller.fixJobs(job.source, [job]),
+                  onPressed: () => job.source == JobSource.webdav
+                      ? controller.fixWebDavJobs(only: [job])
+                      : controller.fixJobs(job.source, [job]),
                   icon: const Icon(Icons.build_rounded, size: 18),
                   label: Text(job.status.fixable ? '修复这条' : '重试'),
                 ),

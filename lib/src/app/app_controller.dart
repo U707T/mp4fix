@@ -221,6 +221,14 @@ class AppController extends ChangeNotifier {
     return seg.isEmpty ? treeUri : Uri.decodeComponent(seg);
   }
 
+  /// 用户是否指定了输出文件夹（否则用默认位置）。
+  bool get hasCustomOutput {
+    final tree = settings.outputTreeUri;
+    if (tree != null && tree.isNotEmpty && AndroidPlatform.isSupported) return true;
+    final dir = settings.outputDirPath;
+    return dir != null && dir.isNotEmpty;
+  }
+
   /// 当前输出目标的展示文案（同步，供界面即时显示）。
   String get outputDescription {
     final tree = settings.outputTreeUri;
@@ -556,6 +564,9 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// WebDAV 整批修复使用的模式（上传副本 / 保存到本地），供「重试」沿用。
+  bool webDavUploadCopies = true;
+
   /// 扫描 WebDAV 目录（可选修复）。
   Future<void> scanWebDav({bool fixAfterScan = false, bool uploadCopies = true}) async {
     if (running) return;
@@ -592,22 +603,26 @@ class AppController extends ChangeNotifier {
       client.close();
       _setRunning(null);
     }
+    webDavUploadCopies = uploadCopies;
     if (fixAfterScan && !_cancelRequested) {
       await fixWebDavJobs(uploadCopies: uploadCopies);
     }
   }
 
-  Future<void> fixWebDavJobs({required bool uploadCopies}) async {
+  Future<void> fixWebDavJobs({bool? uploadCopies, List<FixJob>? only}) async {
     if (running) return;
+    uploadCopies ??= webDavUploadCopies;
+    webDavUploadCopies = uploadCopies;
     final client = _webDavClient();
     _setRunning(JobSource.webdav);
     final cache = await _cache();
     final fixer = WebDavFixer(client, cacheDir: cache, repair: _isolateRepair);
     try {
       await _ensureLocalNetworkPermission();
-      final targets = jobs
-          .where((j) => j.source == JobSource.webdav && j.status.fixable)
-          .toList();
+      final targets = only ??
+          jobs
+              .where((j) => j.source == JobSource.webdav && j.status.fixable)
+              .toList();
       final output = uploadCopies ? null : await outputTarget();
       for (final job in targets) {
         if (_cancelRequested) break;
@@ -708,10 +723,10 @@ class AppController extends ChangeNotifier {
             ? job.name.substring(0, job.name.lastIndexOf('.'))
             : job.name;
         final outName = '$base.mp4';
-        final direct = output.directDirectory;
-        final tmp = direct == null
-            ? File('${cache.path}/${job.id}-$outName')
-            : File('${direct.path}/$outName');
+        // 注意：**一律**先修复到缓存里的独立临时文件，再交给 OutputTarget 落位。
+        // 不能直接写输出目录：若用户把"输出=输入"（就地覆盖，或同名文件），
+        // 直写会一边读原文件一边截断它 —— 直接毁掉源文件。
+        final tmp = File('${cache.path}/${job.id}-$outName');
 
         RepairTask? task;
         try {
@@ -731,12 +746,8 @@ class AppController extends ChangeNotifier {
             job.status = JobStatus.cancelled;
             job.message = '已取消';
           } else {
-            if (direct == null) {
-              final saved = await output.save(tmp, outName);
-              job.outputPath = saved;
-            } else {
-              job.outputPath = outName;
-            }
+            final saved = await output.save(tmp, outName);
+            job.outputPath = saved;
             job.status = JobStatus.saved;
             job.message = '已保存：${job.outputPath}';
           }
@@ -746,7 +757,7 @@ class AppController extends ChangeNotifier {
               : JobStatus.failed;
           job.message = job.status == JobStatus.cancelled ? '已取消' : _message(e);
         } finally {
-          if (direct == null && tmp.existsSync()) tmp.deleteSync();
+          if (tmp.existsSync()) tmp.deleteSync();
         }
         job.progress = 0;
         notifyListeners();
@@ -756,16 +767,30 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  /// 清理本地任务留下的缓存副本。
+  /// 清理临时文件：工作目录（修复中间产物）+ Android 侧的导入缓存（content:// 复制件）。
+  ///
+  /// 导入缓存由平台通道写进应用缓存目录的 `imports/`，与工作目录同级 ——
+  /// 之前只清 `work/`，导致导入的整份视频副本长期占空间。
   Future<void> cleanCache() async {
     final cache = await _cache();
-    if (cache.existsSync()) {
-      for (final f in cache.listSync()) {
-        try {
-          f.deleteSync(recursive: true);
-        } catch (_) {}
-      }
+    _deleteContents(cache);
+    try {
+      final tmp = await getTemporaryDirectory();
+      _deleteContents(Directory('${tmp.path}/imports'));
+    } catch (_) {
+      // 忽略
     }
     notifyListeners();
+  }
+
+  void _deleteContents(Directory dir) {
+    if (!dir.existsSync()) return;
+    for (final f in dir.listSync()) {
+      try {
+        f.deleteSync(recursive: true);
+      } catch (_) {
+        // 忽略单个失败（可能被占用）
+      }
+    }
   }
 }

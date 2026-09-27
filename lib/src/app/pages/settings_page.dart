@@ -9,7 +9,7 @@ class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
   /// 与 pubspec.yaml 的 version 保持一致。
-  static const String appVersion = '2.1.1';
+  static const String appVersion = '2.1.2';
 
   @override
   Widget build(BuildContext context) {
@@ -55,10 +55,26 @@ class SettingsPage extends StatelessWidget {
           ListTile(
             title: const Text('输出文件夹'),
             subtitle: Text(controller.outputDescription),
-            trailing: TextButton(
-              onPressed:
-                  canEdit ? () => guardUi(context, controller.pickOutputFolder) : null,
-              child: const Text('选择'),
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (controller.hasCustomOutput)
+                  TextButton(
+                    onPressed: canEdit
+                        ? () => controller.updateSettings((s) {
+                              s.outputTreeUri = null;
+                              s.outputDirPath = null;
+                            })
+                        : null,
+                    child: const Text('恢复默认'),
+                  ),
+                TextButton(
+                  onPressed: canEdit
+                      ? () => guardUi(context, controller.pickOutputFolder)
+                      : null,
+                  child: const Text('选择'),
+                ),
+              ],
             ),
           ),
           const Divider(),

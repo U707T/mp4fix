@@ -9,9 +9,6 @@ abstract class OutputTarget {
   /// 界面展示的"保存到哪"说明。
   String get describe;
 
-  /// 是否为可直接写入的本地目录（可省掉一次临时文件复制）。
-  Directory? get directDirectory => null;
-
   /// 把 [source] 保存为 [name]（同名覆盖），返回展示位置。
   Future<String> save(File source, String name);
 }
@@ -26,14 +23,37 @@ class DirectoryOutputTarget implements OutputTarget {
   String get describe => dir.path;
 
   @override
-  Directory? get directDirectory => dir;
-
-  @override
   Future<String> save(File source, String name) async {
     dir.createSync(recursive: true);
     final target = File('${dir.path}/$name');
-    if (target.existsSync()) target.deleteSync();
-    source.renameSync(target.path);
+
+    // 安全落位（同名覆盖）：旧文件先改名为 .bak → 再把新文件移入 → 成功后删 .bak；
+    // 任一步失败都尽量把旧文件还原，避免"旧文件已删、新文件没写成"的窗口。
+    File? backup;
+    if (target.existsSync()) {
+      backup = File('${target.path}.mp4fix-bak');
+      if (backup.existsSync()) backup.deleteSync();
+      target.renameSync(backup.path);
+    }
+    try {
+      try {
+        source.renameSync(target.path);
+      } on FileSystemException {
+        // 跨卷（例如缓存盘 → 目标盘）rename 会失败：退回复制
+        source.copySync(target.path);
+        source.deleteSync();
+      }
+    } catch (e) {
+      if (backup != null && backup.existsSync()) {
+        try {
+          backup.renameSync(target.path);
+        } catch (_) {
+          // 尽力而为
+        }
+      }
+      rethrow;
+    }
+    if (backup != null && backup.existsSync()) backup.deleteSync();
     return name;
   }
 }
@@ -47,9 +67,6 @@ class SafOutputTarget implements OutputTarget {
 
   @override
   String get describe => '已选文件夹（$displayName）';
-
-  @override
-  Directory? get directDirectory => null;
 
   @override
   Future<String> save(File source, String name) async {
@@ -68,9 +85,6 @@ class DownloadsOutputTarget implements OutputTarget {
 
   @override
   String get describe => '下载/MP4Fix（默认，可在设置里改）';
-
-  @override
-  Directory? get directDirectory => null;
 
   @override
   Future<String> save(File source, String name) => AndroidPlatform.saveToDownloads(

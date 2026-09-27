@@ -171,7 +171,8 @@ class WebDavConfig {
   String get url {
     final scheme = https ? 'https' : 'http';
     final p = port.trim().isEmpty ? (https ? '443' : '80') : port.trim();
-    final cleanPath = path.trim().replaceAll(RegExp(r'^/+|/+$'), '');
+    // 折叠重复斜杠并去掉首尾斜杠（用户手输 'dav//x/' 也能拼出正确 URL）
+    final cleanPath = path.trim().replaceAll(RegExp(r'/+'), '/').replaceAll(RegExp(r'^/|/$'), '');
     return '$scheme://${host.trim()}:$p'
         '${cleanPath.isEmpty ? '' : '/$cleanPath'}';
   }

@@ -150,7 +150,15 @@ class WebDavClient {
         onProgress?.call(done, total);
       }
     } on TimeoutException {
-      throw WebDavException('下载超时（已接收 $done 字节）');
+      final expected = total >= 0 ? total.toString() : '未知';
+      throw WebDavException('下载不完整：已接收 $done/$expected 字节（超时）');
+    } catch (e) {
+      if (e is WebDavException) rethrow;
+      final expected = total >= 0 ? total.toString() : '未知';
+      throw WebDavException(
+        '下载不完整：已接收 $done/$expected 字节（连接中断或被服务端打断）',
+        e,
+      );
     } finally {
       sink.closeSync();
     }

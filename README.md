@@ -72,6 +72,25 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 - **SAF 写入的数据安全**：`name.mp4fix-part` → 校验大小 → **同名旧文件改名为 `.mp4fix-bak` 让位**
   （而不是先删）→ 改名转正 → 清理备份；任一步失败都会还原旧文件，消除「旧文件已删、新文件没写成」的窗口。
 
+## 测试（58 项，`flutter test`）
+
+| 测试文件 | 覆盖 |
+|---|---|
+| `mp4_inspect_test.dart` | 检测器：正常 / 交错不良 / v1 mdhd / 截断 / 阈值行为 |
+| `mp4_repair_test.dart` | 修复：样本数保持 / v1 mdhd 真正重排 / 截断报错 / 取消 |
+| `kotlin_parity_test.dart` | **与 Kotlin 旧引擎逐字节对齐**（金标准） |
+| `lossless_test.dart` | **无损不变量**：独立实现的解析器逐样本比对 大小 / 时间戳 / 描述 / **载荷字节** |
+| `mp4_hardening_test.dart` | 损坏的采样表计数不再触发超大分配（防 OOM 回归） |
+| `robustness_fuzz_test.dart` | 模糊测试：210 次随机字节破坏 / 截断 / 纯随机数据，检测不抛异常、修复只抛可捕获异常 |
+| `engine_edge_test.dart` | moov 后置（可优化 → 修复后 faststart）、co64 64 位偏移表 |
+| `webdav_test.dart` | WebDAV 端到端 12 项（中文/空格路径、Range 降级、认证、取消、产物字节校验…） |
+| `webdav_util_test.dart` | URL 工具 + **服务端提前断开时识别"下载不完整"** |
+| `output_target_test.dart` | 落位安全：同名覆盖 / **失败还原旧文件** / 自动建目录 |
+| `folder_scan_test.dart` | 目录列举：只挑视频、跳过隐藏目录、容忍无权限子目录 |
+| `error_message_test.dart` · `settings_test.dart` | 错误文案映射 · 设置 JSON 往返 |
+
+额外夹具由 `tool/make_extra_fixtures.py` 生成（`moov_last.mp4` / `co64.mp4`）。
+
 ## 开发
 
 ```bash
