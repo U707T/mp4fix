@@ -127,6 +127,16 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
   32 位偏移放不下时**真正启用 co64**（不再是死代码）、切块不跨 sample description；
 - 新增 `test/mp4_hardening_test.dart`（3 项），总测试数 28。
 
+## 签名与升级安装
+
+- release / debug APK 均使用**固定的发布密钥**签名（本地由 `android/key.properties` 提供，
+  CI 由仓库 Secrets 注入，密钥**不落库**）→ 同一签名的包可以**直接覆盖安装**，
+  升级不再需要先卸载；
+- 从 v2.1.x 及更早版本（每次构建都用随机 debug 密钥签名）升级到 v2.2.0 需**卸载一次**，
+  之后所有版本之间都无需卸载；
+- 密钥库与口令保存在工作区 `my-project/mp4fix-release-key/`（`mp4fix-release.jks` +
+  `keystore-credentials.txt`），请妥善备份 —— 丢了这个文件就无法再签出可覆盖安装的包。
+
 ## Windows 版说明
 
 - 解压 `MP4Fix-windows-x64.zip` 后直接运行 `mp4fix.exe`（不需要安装，也不写注册表）；

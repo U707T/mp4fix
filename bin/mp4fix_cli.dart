@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:mp4fix/src/app/defaults.dart';
 import 'package:mp4fix/src/engine/engine.dart';
 import 'package:mp4fix/src/webdav/webdav.dart';
 
@@ -26,14 +27,17 @@ Future<void> main(List<String> args) async {
       _inspect(File(path!));
       return;
     case '--dav-scan':
-      final url = opts.positional.isEmpty ? null : opts.positional.first;
-      if (url == null) _usage();
-      final code = await _davScan(url!, opts);
+      // 不带 URL 时用出厂默认服务器（AppDefaults）
+      final code = await _davScan(
+        opts.positional.isEmpty ? AppDefaults.webDavUrl : opts.positional.first,
+        opts,
+      );
       exit(code);
     case '--dav-fix':
-      final url = opts.positional.isEmpty ? null : opts.positional.first;
-      if (url == null) _usage();
-      final code = await _davFix(url!, opts);
+      final code = await _davFix(
+        opts.positional.isEmpty ? AppDefaults.webDavUrl : opts.positional.first,
+        opts,
+      );
       exit(code);
     case '--help':
     case '-h':
@@ -52,8 +56,8 @@ void _usage() {
     ..writeln('用法:')
     ..writeln('  mp4fix_cli --inspect <文件.mp4>          本地健康检测')
     ..writeln('  mp4fix_cli <输入.mp4> <输出.mp4>          本地无损修复')
-    ..writeln('  mp4fix_cli --dav-scan <URL>              扫描 WebDAV 目录（只读）')
-    ..writeln('  mp4fix_cli --dav-fix  <URL>              扫描并上传修复副本')
+    ..writeln('  mp4fix_cli --dav-scan [URL]              扫描 WebDAV 目录（只读；省略 URL 用默认服务器）')
+    ..writeln('  mp4fix_cli --dav-fix  [URL]              扫描并上传修复副本')
     ..writeln()
     ..writeln('选项:')
     ..writeln('  --user <用户名>  --pass <密码>  --threshold <MB，默认 4，可小数>')

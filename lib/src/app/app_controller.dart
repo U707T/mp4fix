@@ -61,6 +61,10 @@ class AppController extends ChangeNotifier {
 
   Future<void> init() async {
     settings = await SettingsStore.load() ?? AppSettings();
+    // 恢复「记住密码」时保存的密码
+    if (settings.rememberWebDavPassword && settings.webDavPassword.isNotEmpty) {
+      webDavPassword = settings.webDavPassword;
+    }
     // 桌面：提前建好默认输出目录，避免首次修复因"目录不存在"失败
     if (!AndroidPlatform.isSupported) {
       try {
@@ -534,8 +538,25 @@ class AppController extends ChangeNotifier {
     );
   }
 
-  /// 密码只保存在内存（不落盘）。
+  /// 当前 WebDAV 密码：仅在勾选「记住密码」时写进本机设置文件。
   String webDavPassword = '';
+
+  /// 更新密码输入（勾了「记住密码」就同步落盘，避免连一次都要重输）。
+  void updateWebDavPassword(String value) {
+    webDavPassword = value;
+    if (settings.rememberWebDavPassword) {
+      settings.webDavPassword = value;
+      unawaited(SettingsStore.save(settings));
+    }
+  }
+
+  /// 切换「记住密码」。
+  void setRememberWebDavPassword(bool value) {
+    settings.rememberWebDavPassword = value;
+    settings.webDavPassword = value ? webDavPassword : '';
+    unawaited(SettingsStore.save(settings));
+    notifyListeners();
+  }
 
   /// 测试连接（返回根目录条目统计）。
   Future<String> testWebDavConnection() async {

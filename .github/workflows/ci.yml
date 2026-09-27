@@ -53,6 +53,16 @@ jobs:
           java-version: 21
       - name: Get dependencies
         run: flutter pub get
+      # 固定签名：keystore 与口令来自仓库 secrets（与 iris 同一套做法）。
+      # 这样每次构建的 APK 签名一致 —— 升级安装不再需要先卸载。
+      - name: Decode and save keystore
+        run: echo "${{ secrets.KEYSTORE }}" | base64 --decode > android/app/keystore.jks
+      - name: Save key.properties
+        run: |
+          echo "storePassword=${{ secrets.STORE_PASSWORD }}" >> android/key.properties
+          echo "keyPassword=${{ secrets.KEY_PASSWORD }}" >> android/key.properties
+          echo "keyAlias=${{ secrets.KEY_ALIAS }}" >> android/key.properties
+          echo "storeFile=keystore.jks" >> android/key.properties
       - name: Build debug APK (arm64)
         run: flutter build apk --debug --target-platform=android-arm64
       - name: Build release APKs (split per ABI)

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../engine/engine.dart';
+import 'defaults.dart';
 
 /// 任务来源（对应三个功能入口）。
 enum JobSource { local, folder, webdav }
@@ -150,14 +151,16 @@ class FixJob {
 }
 
 /// WebDAV 连接配置（密码不落盘）。
+///
+/// 默认值来自 [AppDefaults]（出厂即指向默认 alist 服务器，表单可直接用）。
 class WebDavConfig {
   WebDavConfig({
-    this.host = '',
-    this.port = '',
-    this.path = '',
-    this.user = '',
-    this.https = false,
-    this.insecure = false,
+    this.host = AppDefaults.webDavHost,
+    this.port = AppDefaults.webDavPort,
+    this.path = AppDefaults.webDavPath,
+    this.user = AppDefaults.webDavUser,
+    this.https = AppDefaults.webDavHttps,
+    this.insecure = AppDefaults.webDavInsecure,
   });
 
   String host;
@@ -186,26 +189,36 @@ class WebDavConfig {
     'insecure': insecure,
   };
 
-  static WebDavConfig fromJson(Map<String, Object?> json) => WebDavConfig(
-    host: json['host'] as String? ?? '',
-    port: json['port'] as String? ?? '',
-    path: json['path'] as String? ?? '',
-    user: json['user'] as String? ?? '',
-    https: json['https'] as bool? ?? false,
-    insecure: json['insecure'] as bool? ?? false,
-  );
+  static WebDavConfig fromJson(Map<String, Object?> json) {
+    // 空字段回落到出厂默认值：老版本存档里是空串，升级后同样能"不改就直连"
+    String pick(String key, String fallback) {
+      final value = json[key] as String?;
+      return (value == null || value.isEmpty) ? fallback : value;
+    }
+
+    return WebDavConfig(
+      host: pick('host', AppDefaults.webDavHost),
+      port: pick('port', AppDefaults.webDavPort),
+      path: pick('path', AppDefaults.webDavPath),
+      user: pick('user', AppDefaults.webDavUser),
+      https: json['https'] as bool? ?? AppDefaults.webDavHttps,
+      insecure: json['insecure'] as bool? ?? AppDefaults.webDavInsecure,
+    );
+  }
 }
 
 /// 应用设置（可持久化）。
 class AppSettings {
   AppSettings({
-    this.thresholdMb = 4,
+    this.thresholdMb = AppDefaults.thresholdMb,
     this.includeOptimizable = false,
     this.themeMode = ThemeMode.system,
     this.outputTreeUri,
     this.outputDirPath,
     this.scanInputTreeUri,
     this.scanInputDirPath,
+    this.rememberWebDavPassword = false,
+    this.webDavPassword = '',
     WebDavConfig? webdav,
   }) : webdav = webdav ?? WebDavConfig();
 
@@ -228,6 +241,13 @@ class AppSettings {
 
   WebDavConfig webdav;
 
+  /// 是否把 WebDAV 密码保存在本机设置文件里（默认关闭）。
+  bool rememberWebDavPassword;
+
+  /// 本机保存的 WebDAV 密码（仅当 [rememberWebDavPassword] 为真时使用；
+  /// 注意：明文存在应用私有目录，不加密）。
+  String webDavPassword;
+
   int get thresholdBytes => thresholdMb * 1024 * 1024;
 
   Map<String, Object?> toJson() => {
@@ -238,11 +258,13 @@ class AppSettings {
     'outputDirPath': outputDirPath,
     'scanInputTreeUri': scanInputTreeUri,
     'scanInputDirPath': scanInputDirPath,
+    'rememberWebDavPassword': rememberWebDavPassword,
+    'webDavPassword': webDavPassword,
     'webdav': webdav.toJson(),
   };
 
   static AppSettings fromJson(Map<String, Object?> json) => AppSettings(
-    thresholdMb: json['thresholdMb'] as int? ?? 4,
+    thresholdMb: json['thresholdMb'] as int? ?? AppDefaults.thresholdMb,
     includeOptimizable: json['includeOptimizable'] as bool? ?? false,
     themeMode: ThemeMode.values.firstWhere(
       (m) => m.name == json['themeMode'],
@@ -252,6 +274,8 @@ class AppSettings {
     outputDirPath: json['outputDirPath'] as String?,
     scanInputTreeUri: json['scanInputTreeUri'] as String?,
     scanInputDirPath: json['scanInputDirPath'] as String?,
+    rememberWebDavPassword: json['rememberWebDavPassword'] as bool? ?? false,
+    webDavPassword: json['webDavPassword'] as String? ?? '',
     webdav: WebDavConfig.fromJson(
       (json['webdav'] as Map?)?.cast<String, Object?>() ?? const {},
     ),

@@ -27,12 +27,13 @@ class _WebDavPageState extends State<WebDavPage> {
     super.didChangeDependencies();
     if (_seeded) return;
     _seeded = true;
-    final cfg = AppScope.of(context).settings.webdav;
+    final controller = AppScope.of(context);
+    final cfg = controller.settings.webdav;
     _host = TextEditingController(text: cfg.host);
     _port = TextEditingController(text: cfg.port);
     _path = TextEditingController(text: cfg.path);
     _user = TextEditingController(text: cfg.user);
-    _pass = TextEditingController();
+    _pass = TextEditingController(text: controller.webDavPassword);
   }
 
   @override
@@ -79,7 +80,7 @@ class _WebDavPageState extends State<WebDavPage> {
                         enabled: canRun,
                         decoration: const InputDecoration(
                           labelText: '主机',
-                          hintText: '192.168.28.156',
+                          hintText: '默认已填，可直接改',
                           isDense: true,
                         ),
                         onChanged: (v) =>
@@ -109,7 +110,7 @@ class _WebDavPageState extends State<WebDavPage> {
                   enabled: canRun,
                   decoration: const InputDecoration(
                     labelText: '路径',
-                    hintText: '/dav/本地存储/Vedios',
+                    hintText: '/dav（可指向子目录）',
                     isDense: true,
                   ),
                   onChanged: (v) =>
@@ -140,7 +141,7 @@ class _WebDavPageState extends State<WebDavPage> {
                           labelText: '密码（不落盘）',
                           isDense: true,
                         ),
-                        onChanged: (v) => controller.webDavPassword = v,
+                        onChanged: controller.updateWebDavPassword,
                       ),
                     ),
                   ],
@@ -173,6 +174,14 @@ class _WebDavPageState extends State<WebDavPage> {
                       ),
                     ),
                   ],
+                ),
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('记住密码'),
+                  subtitle: const Text('保存在本机设置文件里（明文，不加密）'),
+                  value: controller.settings.rememberWebDavPassword,
+                  onChanged: controller.setRememberWebDavPassword,
                 ),
                 SegmentedButton<bool>(
                   showSelectedIcon: false,
