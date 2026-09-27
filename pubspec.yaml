@@ -1,7 +1,7 @@
 name: mp4fix
-description: "A new Flutter project."
+description: "MP4 无损修复器：修复音视频交错被打乱的 MP4（不重新编码），支持本地文件 / 文件夹批量 / WebDAV 扫描修复。"
 publish_to: 'none'
-version: 0.1.0+1
+version: 2.0.0+1
 
 environment:
   sdk: ^3.13.4
@@ -9,8 +9,15 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  flutter_localizations:
+    sdk: flutter
   # WebDAV 的 PROPFIND（multistatus）响应解析
   xml: ^6.6.1
+  # Android 集成：文件选择 / 目录读写 / 权限 / 路径
+  file_picker: ^13.1.0
+  path_provider: ^2.1.6
+  permission_handler: ^13.0.2
+  saf_util: ^3.1.0
 
 dev_dependencies:
   flutter_test:

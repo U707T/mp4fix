@@ -1,0 +1,131 @@
+name: ci
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    paths-ignore:
+      - README.md
+      - LICENSE
+  pull_request:
+    paths-ignore:
+      - README.md
+      - LICENSE
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------- 测试
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.5
+          cache: true
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Analyze
+        run: dart analyze
+      - name: Test (engine + WebDAV end-to-end, 25 项)
+        run: flutter test
+
+  # ---------------------------------------------------------------- Android
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone repository
+        uses: actions/checkout@v4
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.5
+          cache: true
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu
+          java-version: 21
+      - name: Get dependencies
+        run: flutter pub get
+      - name: Build debug APK (arm64)
+        run: flutter build apk --debug --target-platform=android-arm64
+      - name: Build release APKs (split per ABI)
+        run: flutter build apk --release --split-per-abi
+      - name: Rename APKs
+        run: |
+          mv build/app/outputs/flutter-apk/app-debug.apk MP4Fix-debug-arm64.apk
+          mv build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk MP4Fix-release-armeabi-v7a.apk
+          mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk MP4Fix-release-arm64-v8a.apk
+          mv build/app/outputs/flutter-apk/app-x86_64-release.apk MP4Fix-release-x86_64.apk
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: MP4Fix-debug-arm64.apk
+          path: MP4Fix-debug-arm64.apk
+      - name: Upload release APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: MP4Fix-release-apks
+          path: MP4Fix-release-*.apk
+
+  # ---------------------------------------------------------------- 发布
+  # 仅当 pubspec.yaml 的版本号尚无对应 tag 时创建 Release（普通提交只构建不发布）
+  release:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    needs:
+      - test
+      - build-android
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Get version
+        id: yq
+        uses: mikefarah/yq@master
+        with:
+          cmd: yq '.version' 'pubspec.yaml'
+      - name: Prepare tag name
+        id: tag_name
+        run: |
+          VERSION="${{ steps.yq.outputs.result }}"
+          TAG_NAME="v${VERSION%%+*}"
+          echo "TAG_NAME=$TAG_NAME" >> "$GITHUB_OUTPUT"
+          case "$TAG_NAME" in
+            *-*) echo "PRERELEASE=true" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "PRERELEASE=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+      - name: Check tag
+        uses: mukunku/tag-exists-action@v1.6.0
+        id: check-tag
+        with:
+          tag: ${{ steps.tag_name.outputs.TAG_NAME }}
+      - name: Download artifacts
+        if: steps.check-tag.outputs.exists == 'false'
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Release
+        if: steps.check-tag.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.tag_name.outputs.TAG_NAME }}
+          name: ${{ steps.tag_name.outputs.TAG_NAME }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ steps.tag_name.outputs.PRERELEASE == 'true' }}
+          files: |
+            artifacts/MP4Fix-debug-arm64.apk
+            artifacts/MP4Fix-release-armeabi-v7a.apk
+            artifacts/MP4Fix-release-arm64-v8a.apk
+            artifacts/MP4Fix-release-x86_64.apk

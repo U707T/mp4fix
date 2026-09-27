@@ -1,6 +1,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+      Android 17（API 37）起启用「本地网络保护」(LNP)：targetSdk >= 37 的应用若没有该权限，
+      系统会静默丢弃发往局域网（私有地址）的数据包，表现为连接超时（访问公网却正常）。
+      低版本系统不认识该权限，声明了也没有副作用。
+    -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+
     <application
-        android:label="mp4fix"
+        android:label="MP4 修复器"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
