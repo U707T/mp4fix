@@ -11,12 +11,13 @@ UI 按 Material 3 重构，WebDAV / SAF / 权限等平台能力按 **Android 优
 
 到 [Releases](https://github.com/U707T/mp4fix/releases/latest) 下载对应 APK：
 
-| 文件 | 说明 |
-|---|---|
-| `MP4Fix-release-arm64-v8a.apk` | 现代手机（推荐） |
-| `MP4Fix-release-armeabi-v7a.apk` | 老设备（32 位） |
-| `MP4Fix-release-x86_64.apk` | 模拟器 / x86 设备 |
-| `MP4Fix-debug-arm64.apk` | 调试版（带日志，体积大） |
+| 文件 | 平台 | 说明 |
+|---|---|---|
+| `MP4Fix-release-arm64-v8a.apk` | Android | 现代手机（推荐） |
+| `MP4Fix-release-armeabi-v7a.apk` | Android | 老设备（32 位） |
+| `MP4Fix-release-x86_64.apk` | Android | 模拟器 / x86 设备 |
+| `MP4Fix-debug-arm64.apk` | Android | 调试版（带日志，体积大） |
+| `MP4Fix-windows-x64.zip` | Windows 10/11 x64 | 解压后运行 `mp4fix.exe`（绿色免安装） |
 
 > 覆盖安装旧版 Kotlin 应用前请先卸载（签名不同，无法原地升级）。
 > 首次访问局域网 WebDAV 时，系统会请求**「本地网络」权限**（Android 17 起必需），请点「允许」。
@@ -95,6 +96,12 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
 2. push 到 `main` → CI 自动：`test`（analyze + 25 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## Windows 版说明
+
+- 解压 `MP4Fix-windows-x64.zip` 后直接运行 `mp4fix.exe`（不需要安装，也不写注册表）；
+- 输出文件夹用系统目录选择器选；WebDAV 的「本地网络权限」只与 Android 有关，Windows 不需要；
+- 引擎与 Android 完全同一套（纯 Dart），修复结果逐字节一致。
 
 ## 限制
 
