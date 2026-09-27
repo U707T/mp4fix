@@ -59,6 +59,9 @@ class Mp4Repair {
   static const int _coalesceCap = 8 * (1 << 20);
   static const int _u32Max = 0xFFFFFFFF;
 
+  /// 输出体积上限（32 位偏移不够时改用 co64；这里只做一个理智值兜底）。
+  static const int _maxOutputBytes = 1 << 40; // 1 TB
+
   static const int _kindRaw = 0;
   static const int _kindStsc = 1;
   static const int _kindOffsets = 2;
@@ -186,18 +189,20 @@ class Mp4Repair {
       }
     }
 
-    // 布局：先按 stco(32bit) 试算，超出 4GB 再换 co64
+    // 布局：先按 stco(32bit) 试算；放不下就换 co64(64bit)，同时 mdat 用 16 字节大头部
     var useCo64 = false;
     var moovOut = _buildMoov(tracks, useCo64: false, dummy: true);
     var mdatStart = ftyp.length + moovOut.length + 8;
     _assignOffsets(order, mdatStart);
-    if (_overflowCheck(tracks, mdatStart + payloadBytes)) {
+    if (_needsCo64(mdatStart + payloadBytes)) {
       useCo64 = true;
       moovOut = _buildMoov(tracks, useCo64: true, dummy: true);
-      mdatStart = ftyp.length + moovOut.length + 8;
+      mdatStart = ftyp.length + moovOut.length + 16;
       _assignOffsets(order, mdatStart);
-      if (_overflowCheck(tracks, mdatStart + payloadBytes)) {
-        throw RepairException('输出文件超过 4 GB，暂不支持');
+      if (mdatStart + payloadBytes > _maxOutputBytes) {
+        throw RepairException(
+          '输出文件过大（超过 ${formatBytes(_maxOutputBytes)}），暂不支持',
+        );
       }
     }
     moovOut = _buildMoov(tracks, useCo64: useCo64, dummy: false);
@@ -260,15 +265,9 @@ class Mp4Repair {
     );
   }
 
-  bool _overflowCheck(List<_Track> tracks, int totalEnd) {
-    if (totalEnd > _u32Max) return true;
-    for (final t in tracks) {
-      for (var i = 0; i < t.chunkCount.length; i++) {
-        if (t.chunkOutOffset[i] + t.chunkBytes[i] > _u32Max) return true;
-      }
-    }
-    return false;
-  }
+  /// 32 位 chunk 偏移是否放得下（放不下就得用 co64）。
+  /// 各 chunk 的偏移都落在 `[mdatStart, totalEnd]` 区间内，因此只需比较总末端。
+  bool _needsCo64(int totalEnd) => totalEnd > _u32Max;
 
   void _assignOffsets(List<_ChunkRef> order, int base) {
     var pos = base;
@@ -296,6 +295,7 @@ class Mp4Repair {
     final mdhd = _firstOf(mdiaChildren, 'mdhd');
     if (mdhd == null) throw RepairException('mdia 缺少 mdhd 盒');
     final mdhdRaw = readBytes(_input, mdhd.start, mdhd.size);
+    if (mdhdRaw.length < 32) throw RepairException('mdhd 盒过小（疑似损坏）');
     final mdhdVer = mdhdRaw[8];
     // v0: creation@12(32) modification@16(32) timescale@20(32)
     // v1: creation@12(64) modification@20(64) timescale@28(32)  ← timescale 仍是 32 位！
@@ -305,6 +305,7 @@ class Mp4Repair {
     final hdlr = _firstOf(mdiaChildren, 'hdlr');
     if (hdlr != null) {
       final hr = readBytes(_input, hdlr.start, hdlr.size < 24 ? hdlr.size : 24);
+      if (hr.length < 20) throw RepairException('hdlr 盒过小（疑似损坏）');
       final handlerType = fourcc(hr, 16);
       t.isVideo = handlerType == 'vide';
       t.isAudio = handlerType == 'soun';
@@ -451,8 +452,10 @@ class Mp4Repair {
   }
 
   List<List<int>> _parseStsc(Uint8List raw) {
+    if (raw.length < 16) throw RepairException('stsc 盒过小（疑似损坏）');
     final cnt = u32AsInt(raw, 12);
     if (cnt <= 0) throw RepairException('stsc 表为空');
+    checkTableFits(raw, cnt, 12, 16, 'stsc');
     final out = List<List<int>>.generate(cnt, (_) => List<int>.filled(3, 0));
     var p = 16;
     for (var i = 0; i < cnt; i++) {
@@ -468,7 +471,9 @@ class Mp4Repair {
   }
 
   List<int> _parseStco(Uint8List raw, {required bool is64}) {
+    if (raw.length < 16) throw RepairException('stco 盒过小（疑似损坏）');
     final cnt = u32AsInt(raw, 12);
+    checkTableFits(raw, cnt, is64 ? 8 : 4, 16, is64 ? 'co64' : 'stco');
     final out = List<int>.filled(cnt, 0);
     var p = 16;
     for (var i = 0; i < cnt; i++) {
@@ -479,8 +484,10 @@ class Mp4Repair {
   }
 
   List<int> _parseStsz(Uint8List raw) {
+    if (raw.length < 20) throw RepairException('stsz 盒过小（疑似损坏）');
     final uniform = u32(raw, 12);
     final cnt = u32AsInt(raw, 16);
+    if (uniform == 0) checkTableFits(raw, cnt, 4, 20, 'stsz');
     final out = List<int>.filled(cnt, 0);
     if (uniform != 0) {
       out.fillRange(0, cnt, uniform);
@@ -495,7 +502,9 @@ class Mp4Repair {
   }
 
   ({List<int> counts, List<int> deltas}) _parseStts(Uint8List raw) {
+    if (raw.length < 16) throw RepairException('stts 盒过小（疑似损坏）');
     final cnt = u32AsInt(raw, 12);
+    checkTableFits(raw, cnt, 8, 16, 'stts');
     final counts = List<int>.filled(cnt, 0);
     final deltas = List<int>.filled(cnt, 0);
     var p = 16;
@@ -529,6 +538,8 @@ class Mp4Repair {
         if (dur >= target) break;
         if (b >= _maxChunkBytes) break;
         if (i - start >= _maxChunkSamples) break;
+        // 不跨 sample description：一个块只能有一个 stsc 描述，否则样本描述会串
+        if (i < n && t.descIdx[i] != t.descIdx[start]) break;
       }
       first.add(start);
       cnt.add(i - start);

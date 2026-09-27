@@ -1,9 +1,13 @@
 package com.u707t.mp4fix
 
+import android.content.ContentValues
 import android.net.Uri
+import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
+import android.provider.MediaStore
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -51,6 +55,16 @@ class MainActivity : FlutterActivity() {
                     return
                 }
                 runInBackground(result) { copyToCache(uri, name) }
+            }
+
+            "saveToDownloads" -> {
+                val name = call.argument<String>("name")
+                val sourcePath = call.argument<String>("sourcePath")
+                if (name.isNullOrBlank() || sourcePath.isNullOrBlank()) {
+                    result.error("bad_args", "缺少参数", null)
+                    return
+                }
+                runInBackground(result) { saveToDownloads(name, File(sourcePath)) }
             }
 
             "deleteDocument" -> {
@@ -201,6 +215,51 @@ class MainActivity : FlutterActivity() {
         )?.use { c -> if (c.moveToFirst() && !c.isNull(0)) c.getLong(0) else -1L } ?: -1L
     } catch (e: Exception) {
         -1L
+    }
+
+    // ---------------------------------------------------------------- 公共下载目录
+
+    /**
+     * 保存到公共「下载/MP4Fix」目录（Android 10+ 走 MediaStore，无需任何权限，用户可见）。
+     * 低版本退回应用外部目录（同样不需要权限）。
+     */
+    private fun saveToDownloads(name: String, source: File): String {
+        val resolver = contentResolver
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                    Environment.DIRECTORY_DOWNLOADS + "/MP4Fix",
+                )
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IOException("无法在下载目录创建文件")
+            try {
+                resolver.openOutputStream(uri, "w")?.use { out ->
+                    source.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
+                } ?: throw IOException("无法写入下载目录")
+            } catch (e: Exception) {
+                runCatching { resolver.delete(uri, null, null) }
+                throw e
+            }
+            resolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) },
+                null,
+                null,
+            )
+            return "下载/MP4Fix/$name"
+        }
+        val dir = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "MP4Fix")
+        if (!dir.exists()) dir.mkdirs()
+        val out = File(dir, name)
+        source.inputStream().use { input ->
+            out.outputStream().buffered(1 shl 20).use { o -> input.copyTo(o, 1 shl 20) }
+        }
+        return out.absolutePath
     }
 
     // ---------------------------------------------------------------- 输入复制

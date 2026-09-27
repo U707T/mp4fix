@@ -59,10 +59,24 @@ extension JobStatusX on JobStatus {
       this == JobStatus.uploaded;
 }
 
-/// 统一的错误文案（去掉 Dart 异常类型前缀）。
-String describeError(Object e) => e
-    .toString()
-    .replaceFirst(RegExp(r'^(Bad state|Exception|StateError|FormatException):\s*'), '');
+/// 统一的错误文案：常见 IO 错误给出可操作的中文提示，其余去掉异常类型前缀。
+String describeError(Object e) {
+  final raw = e.toString();
+  if (raw.contains('PathNotFoundException') || raw.contains('errno = 2')) {
+    return '目标目录不存在或不可写（请在设置里重新选择输出文件夹）';
+  }
+  if (raw.contains('errno = 13') || raw.contains('Permission denied')) {
+    return '没有写入权限（请换一个输出文件夹）';
+  }
+  if (raw.contains('ENOSPC') || raw.contains('No space left')) {
+    return '存储空间不足';
+  }
+  return raw.replaceFirst(
+    RegExp(r'^(Bad state|Exception|StateError|FormatException|'
+        r'FileSystemException|PathNotFoundException|MissingPluginException):\s*'),
+    '',
+  );
+}
 
 /// 列表里的一条任务（对应一个视频文件）。
 class FixJob {

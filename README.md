@@ -26,7 +26,7 @@ UI 按 Material 3 重构，WebDAV / SAF / 权限等平台能力按 **Android 优
 
 | 入口 | 能力 |
 |---|---|
-| **本地文件** | 多选 MP4 / M4V / MOV → 自动检测 → 一键无损修复 → 保存到所选文件夹（原文件不动） |
+| **本地文件** | 多选 MP4 / M4V / MOV → 自动检测 → 一键无损修复 → 保存到所选文件夹（原文件不动；**Android 默认存到公共「下载/MP4Fix」**） |
 | **文件夹批量** | 递归扫描整个文件夹（Android 走 SAF），只体检或「扫描并修复」；输出文件夹可选成输入文件夹实现就地覆盖 |
 | **WebDAV** | 填主机/端口/路径/账号 → 测试连接 → 扫描（**只读 moov，不整档下载**）→ 「上传副本」或「保存到本地（服务器全程只读）」 |
 | **设置** | 判定阈值 1/2/4/8 MB、含「可优化」、输出文件夹、主题、清理缓存、关于 |
@@ -96,6 +96,17 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
 2. push 到 `main` → CI 自动：`test`（analyze + 25 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.1.0）
+
+- 修复「本地文件」修复失败的 bug：默认输出目录不存在时没有先创建父目录
+  （`PathNotFoundException`），现在写入前会建好目录，并且 IO 错误会显示成可操作的中文提示；
+- Android 默认输出改到**公共「下载/MP4Fix」**（MediaStore，无需权限）—— 之前落在应用私有目录，
+  文件管理器里找不到；
+- 失败 / 取消的任务在列表里可以直接「重试」；
+- 引擎加固（RC 复查遗留项）：采样表长度自洽校验（损坏/恶意文件不再可能触发超大分配 → OOM）、
+  32 位偏移放不下时**真正启用 co64**（不再是死代码）、切块不跨 sample description；
+- 新增 `test/mp4_hardening_test.dart`（3 项），总测试数 28。
 
 ## Windows 版说明
 

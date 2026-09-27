@@ -49,6 +49,21 @@ class AndroidPlatform {
     return result;
   }
 
+  /// 保存到公共「下载/MP4Fix」目录（Android 10+ 无需权限），返回展示路径。
+  static Future<String> saveToDownloads({
+    required String name,
+    required String sourcePath,
+  }) async {
+    final result = await _channel.invokeMethod<String>('saveToDownloads', {
+      'name': name,
+      'sourcePath': sourcePath,
+    });
+    if (result == null || result.isEmpty) {
+      throw StateError('保存失败（平台未返回路径）');
+    }
+    return result;
+  }
+
   /// 删除文档（尽力而为，失败不抛错）。
   static Future<void> deleteDocument(String uri) async {
     try {

@@ -102,7 +102,10 @@ void _repairWorker(_RepairArgs args) {
   var lastSentMs = 0;
   try {
     input = FileSeekableInput(File(args.inputPath));
-    sink = FileSyncSink(File(args.outputPath).openSync(mode: FileMode.write));
+    final outFile = File(args.outputPath);
+    // 输出目录可能还不存在（默认输出目录 / 用户刚选的目录）→ 先建出来
+    outFile.parent.createSync(recursive: true);
+    sink = FileSyncSink(outFile.openSync(mode: FileMode.write));
     final stats = Mp4Repair.repair(
       input,
       sink,

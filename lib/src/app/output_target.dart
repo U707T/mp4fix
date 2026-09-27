@@ -62,6 +62,23 @@ class SafOutputTarget implements OutputTarget {
   }
 }
 
+/// Android 默认：公共「下载/MP4Fix」（MediaStore，无需权限、文件管理器中可见）。
+class DownloadsOutputTarget implements OutputTarget {
+  const DownloadsOutputTarget();
+
+  @override
+  String get describe => '下载/MP4Fix（默认，可在设置里改）';
+
+  @override
+  Directory? get directDirectory => null;
+
+  @override
+  Future<String> save(File source, String name) => AndroidPlatform.saveToDownloads(
+    name: name,
+    sourcePath: source.path,
+  );
+}
+
 /// 兜底：应用文档目录下的 `MP4Fix/`（无需任何权限）。
 Future<OutputTarget> defaultOutputTarget() async {
   final dir = await getApplicationDocumentsDirectory();

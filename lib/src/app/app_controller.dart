@@ -131,7 +131,7 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  String _message(Object e) => errorMessage(e);
+  String _message(Object e) => describeError(e);
 
   /// 供 [WebDavFixer] 使用的修复执行器：在后台 Isolate 中跑引擎，避免卡住界面。
   Future<void> _isolateRepair({
@@ -167,6 +167,8 @@ class AppController extends ChangeNotifier {
     if (dirPath != null && dirPath.isNotEmpty) {
       return DirectoryOutputTarget(Directory(dirPath));
     }
+    // Android 默认落到公共「下载/MP4Fix」，避免产物藏在应用私有目录里找不到
+    if (AndroidPlatform.isSupported) return const DownloadsOutputTarget();
     return defaultOutputTarget();
   }
 
@@ -185,6 +187,7 @@ class AppController extends ChangeNotifier {
     }
     final dir = settings.outputDirPath;
     if (dir != null && dir.isNotEmpty) return '输出：$dir';
+    if (AndroidPlatform.isSupported) return '输出：下载/MP4Fix（默认）';
     return '输出：应用文档目录/MP4Fix（默认）';
   }
 

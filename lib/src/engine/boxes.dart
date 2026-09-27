@@ -51,6 +51,22 @@ List<Box> readBoxes(SeekableInput input, int from, int to) {
   return list;
 }
 
+/// 校验"头部 + 条目数 × 条目长度"是否落在盒内。
+///
+/// 损坏 / 恶意文件常在此处声明巨大计数，直接按计数分配会造成超大数组
+/// （`OutOfMemoryError` 属于 Error，`catch (Exception)` 接不住，会直接把线程打崩）。
+void checkTableFits(
+  Uint8List raw,
+  int count,
+  int entrySize,
+  int headerSize,
+  String box,
+) {
+  if (count < 0 || headerSize + count * entrySize > raw.length) {
+    throw RepairException('$box 表长度异常（疑似损坏）');
+  }
+}
+
 /// 完整读取 [size] 字节（循环直到读满）。
 Uint8List readBytes(SeekableInput input, int offset, int size) {
   if (size < 0 || size > (1 << 30)) throw RepairException('盒大小异常');

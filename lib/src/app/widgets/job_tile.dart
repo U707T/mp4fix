@@ -72,14 +72,17 @@ class JobTile extends StatelessWidget {
                 ),
               ),
             ],
-            if (job.status.fixable && !controller.running) ...[
+            if ((job.status.fixable ||
+                    job.status == JobStatus.failed ||
+                    job.status == JobStatus.cancelled) &&
+                !controller.running) ...[
               const SizedBox(height: 6),
               Align(
                 alignment: Alignment.centerRight,
                 child: TextButton.icon(
                   onPressed: () => controller.fixJobs(job.source, [job]),
                   icon: const Icon(Icons.build_rounded, size: 18),
-                  label: const Text('修复这条'),
+                  label: Text(job.status.fixable ? '修复这条' : '重试'),
                 ),
               ),
             ],

@@ -294,6 +294,7 @@ abstract final class Mp4Inspect {
     final mdhd = _firstOf(mdiaChildren, 'mdhd');
     if (mdhd == null) throw RepairException('mdia 缺少 mdhd 盒');
     final mdhdRaw = readBytes(input, mdhd.start, mdhd.size);
+    if (mdhdRaw.length < 32) throw RepairException('mdhd 盒过小（疑似损坏）');
     final mdhdVer = mdhdRaw[8];
     // v0: timescale@20(32)；v1: creation/modification 各 64 位，timescale@28 仍是 32 位
     t.timescale = mdhdVer == 1 ? u32(mdhdRaw, 28) : u32(mdhdRaw, 20);
@@ -302,6 +303,7 @@ abstract final class Mp4Inspect {
     final hdlr = _firstOf(mdiaChildren, 'hdlr');
     if (hdlr != null) {
       final hr = readBytes(input, hdlr.start, hdlr.size < 24 ? hdlr.size : 24);
+      if (hr.length < 20) throw RepairException('hdlr 盒过小（疑似损坏）');
       final handler = fourcc(hr, 16);
       t.isVideo = handler == 'vide';
       t.isAudio = handler == 'soun';
@@ -424,8 +426,10 @@ abstract final class Mp4Inspect {
   // ---------------------------------------------------------------- 表解析
 
   static List<List<int>> _parseStsc(Uint8List raw) {
+    if (raw.length < 16) throw RepairException('stsc 盒过小（疑似损坏）');
     final cnt = u32AsInt(raw, 12);
     if (cnt <= 0) throw RepairException('stsc 表为空');
+    checkTableFits(raw, cnt, 12, 16, 'stsc');
     final out = List<List<int>>.generate(cnt, (_) => List<int>.filled(3, 0));
     var p = 16;
     for (var i = 0; i < cnt; i++) {
@@ -441,7 +445,9 @@ abstract final class Mp4Inspect {
   }
 
   static List<int> _parseStco(Uint8List raw, {required bool is64}) {
+    if (raw.length < 16) throw RepairException('stco 盒过小（疑似损坏）');
     final cnt = u32AsInt(raw, 12);
+    checkTableFits(raw, cnt, is64 ? 8 : 4, 16, is64 ? 'co64' : 'stco');
     final out = List<int>.filled(cnt, 0);
     var p = 16;
     for (var i = 0; i < cnt; i++) {
@@ -452,8 +458,10 @@ abstract final class Mp4Inspect {
   }
 
   static List<int> _parseStsz(Uint8List raw) {
+    if (raw.length < 20) throw RepairException('stsz 盒过小（疑似损坏）');
     final uniform = u32(raw, 12);
     final cnt = u32AsInt(raw, 16);
+    if (uniform == 0) checkTableFits(raw, cnt, 4, 20, 'stsz');
     final out = List<int>.filled(cnt, 0);
     if (uniform != 0) {
       out.fillRange(0, cnt, uniform);
@@ -468,7 +476,9 @@ abstract final class Mp4Inspect {
   }
 
   static ({List<int> counts, List<int> deltas}) _parseStts(Uint8List raw) {
+    if (raw.length < 16) throw RepairException('stts 盒过小（疑似损坏）');
     final cnt = u32AsInt(raw, 12);
+    checkTableFits(raw, cnt, 8, 16, 'stts');
     final counts = List<int>.filled(cnt, 0);
     final deltas = List<int>.filled(cnt, 0);
     var p = 16;
