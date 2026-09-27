@@ -59,16 +59,20 @@ extension JobStatusX on JobStatus {
       this == JobStatus.uploaded;
 }
 
+bool _hasErrno(String text, int errno) =>
+    RegExp('\\berrno = ' + errno.toString() + '\\b').hasMatch(text);
+
 /// 统一的错误文案：常见 IO 错误给出可操作的中文提示，其余去掉异常类型前缀。
 String describeError(Object e) {
   final raw = e.toString();
-  if (raw.contains('PathNotFoundException') || raw.contains('errno = 2')) {
+  // 注意用 \b 限定：'errno = 2' 是 'errno = 28' 的子串，直接 contains 会误判
+  if (raw.contains('PathNotFoundException') || _hasErrno(raw, 2)) {
     return '目标目录不存在或不可写（请在设置里重新选择输出文件夹）';
   }
-  if (raw.contains('errno = 13') || raw.contains('Permission denied')) {
+  if (_hasErrno(raw, 13) || raw.contains('Permission denied')) {
     return '没有写入权限（请换一个输出文件夹）';
   }
-  if (raw.contains('ENOSPC') || raw.contains('No space left')) {
+  if (_hasErrno(raw, 28) || raw.contains('ENOSPC') || raw.contains('No space left')) {
     return '存储空间不足';
   }
   return raw.replaceFirst(
