@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app_scope.dart';
 import '../ui.dart';
@@ -8,7 +9,7 @@ class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
   /// 与 pubspec.yaml 的 version 保持一致。
-  static const String appVersion = '2.1.0';
+  static const String appVersion = '2.1.1';
 
   @override
   Widget build(BuildContext context) {
@@ -88,6 +89,19 @@ class SettingsPage extends StatelessWidget {
               if (!context.mounted) return;
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(content: Text('已清理临时文件')),
+              );
+            }),
+          ),
+          ListTile(
+            title: const Text('复制诊断信息'),
+            subtitle: const Text('平台 / 路径 / 是否存在等，反馈问题时附上它'),
+            trailing: const Icon(Icons.bug_report_rounded),
+            onTap: () => guardUi(context, () async {
+              final text = await controller.collectDiagnostics();
+              await Clipboard.setData(ClipboardData(text: text));
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('诊断信息已复制到剪贴板')),
               );
             }),
           ),

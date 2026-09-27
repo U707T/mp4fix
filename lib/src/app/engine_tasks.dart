@@ -22,6 +22,68 @@ Future<InspectReport> inspectFileInIsolate(
   });
 }
 
+/// 桌面端目录列举结果（[skipped] 为因权限等原因被跳过的子目录数）。
+typedef VideoFolderListing = ({
+  List<({String path, String rel, int size})> files,
+  int skipped,
+});
+
+/// 是否参与处理的视频扩展名。
+bool isVideoFileName(String name) {
+  final dot = name.lastIndexOf('.');
+  if (dot < 0) return false;
+  final ext = name.substring(dot + 1).toLowerCase();
+  return ext == 'mp4' || ext == 'm4v' || ext == 'mov';
+}
+
+/// 桌面端：递归列举目录下的视频文件（**同步实现，须在后台 Isolate 中调用**）。
+///
+/// 与 `listSync(recursive: true)` 的差别：逐个目录列举并容忍失败 ——
+/// Windows 上 `System Volume Information`、junction、网络盘等会抛 `errno = 5`，
+/// 之前会让整个扫描直接失败；现在只跳过并计数。
+VideoFolderListing listVideosSync(String rootPath) {
+  final files = <({String path, String rel, int size})>[];
+  var skipped = 0;
+  final stack = <Directory>[Directory(rootPath)];
+  final rootLen = rootPath.endsWith(Platform.pathSeparator)
+      ? rootPath.length
+      : rootPath.length + 1;
+
+  while (stack.isNotEmpty) {
+    final dir = stack.removeLast();
+    final List<FileSystemEntity> entries;
+    try {
+      entries = dir.listSync(followLinks: false);
+    } catch (_) {
+      skipped++;
+      continue;
+    }
+    for (final e in entries) {
+      if (e is Directory) {
+        final name = e.path.split(Platform.pathSeparator).last;
+        if (name.startsWith('.')) continue; // 隐藏目录
+        if (name.toLowerCase() == 'system volume information') continue;
+        stack.add(e);
+      } else if (e is File) {
+        final name = e.path.split(Platform.pathSeparator).last;
+        if (!isVideoFileName(name)) continue;
+        int size;
+        try {
+          size = e.lengthSync();
+        } catch (_) {
+          size = -1;
+        }
+        files.add((
+          path: e.path,
+          rel: e.path.length > rootLen ? e.path.substring(rootLen) : name,
+          size: size,
+        ));
+      }
+    }
+  }
+  return (files: files, skipped: skipped);
+}
+
 /// 后台修复任务的句柄：可监听进度、等待结果、取消。
 class RepairTask {
   RepairTask._(this._isolate, this._port, this._completer);

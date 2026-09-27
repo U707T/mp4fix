@@ -82,5 +82,7 @@ class DownloadsOutputTarget implements OutputTarget {
 /// 兜底：应用文档目录下的 `MP4Fix/`（无需任何权限）。
 Future<OutputTarget> defaultOutputTarget() async {
   final dir = await getApplicationDocumentsDirectory();
-  return DirectoryOutputTarget(Directory('${dir.path}/MP4Fix'));
+  final out = Directory('${dir.path}/MP4Fix');
+  if (!out.existsSync()) out.createSync(recursive: true);
+  return DirectoryOutputTarget(out);
 }

@@ -59,20 +59,50 @@ extension JobStatusX on JobStatus {
       this == JobStatus.uploaded;
 }
 
+/// 规范化"用户选中的路径"：去掉 `file://` 前缀、包裹引号与首尾空白。
+String normalizePickedPath(String raw) {
+  var p = raw.trim();
+  if (p.length >= 2 && p.startsWith('"') && p.endsWith('"')) {
+    p = p.substring(1, p.length - 1).trim();
+  }
+  if (p.startsWith('file:')) {
+    try {
+      return Uri.parse(p).toFilePath();
+    } catch (_) {
+      // 解析失败就按原样使用
+    }
+  }
+  return p;
+}
+
 bool _hasErrno(String text, int errno) =>
     RegExp('\\berrno = $errno\\b').hasMatch(text);
 
 /// 统一的错误文案：常见 IO 错误给出可操作的中文提示，其余去掉异常类型前缀。
 String describeError(Object e) {
   final raw = e.toString();
+  // Windows: 2/3 = 找不到文件/路径；5 = 拒绝访问；32 = 被占用；112 = 磁盘已满
   // 注意用 \b 限定：'errno = 2' 是 'errno = 28' 的子串，直接 contains 会误判
-  if (raw.contains('PathNotFoundException') || _hasErrno(raw, 2)) {
+  if (raw.contains('PathNotFoundException') ||
+      _hasErrno(raw, 2) ||
+      _hasErrno(raw, 3) ||
+      raw.contains('cannot find the path')) {
     return '目标目录不存在或不可写（请在设置里重新选择输出文件夹）';
+  }
+  if (_hasErrno(raw, 5) || raw.contains('Access is denied')) {
+    return '没有权限访问该文件夹（换一个目录，或改用有权限的位置）';
+  }
+  if (_hasErrno(raw, 32) || raw.contains('another process')) {
+    return '文件被其他程序占用（关掉播放器 / 资源管理器预览后重试）';
   }
   if (_hasErrno(raw, 13) || raw.contains('Permission denied')) {
     return '没有写入权限（请换一个输出文件夹）';
   }
-  if (_hasErrno(raw, 28) || raw.contains('ENOSPC') || raw.contains('No space left')) {
+  if (_hasErrno(raw, 28) ||
+      _hasErrno(raw, 112) ||
+      raw.contains('ENOSPC') ||
+      raw.contains('No space left') ||
+      raw.contains('disk is full')) {
     return '存储空间不足';
   }
   return raw.replaceFirst(

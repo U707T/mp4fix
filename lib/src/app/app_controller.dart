@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -29,6 +30,9 @@ class AppController extends ChangeNotifier {
   /// 本地文件的临时目录（缓存）。
   Directory? _cacheDir;
 
+  /// 最近一次操作的补充提示（如"跳过了 N 个无法读取的文件夹"）。
+  String? lastNotice;
+
   bool get running => _runningSource != null;
 
   JobSource? get runningSource => _runningSource;
@@ -57,8 +61,46 @@ class AppController extends ChangeNotifier {
 
   Future<void> init() async {
     settings = await SettingsStore.load() ?? AppSettings();
+    // 桌面：提前建好默认输出目录，避免首次修复因"目录不存在"失败
+    if (!AndroidPlatform.isSupported) {
+      try {
+        await defaultOutputTarget();
+      } catch (_) {
+        // 忽略：真正写入时会给出明确错误
+      }
+    }
     initializing = false;
     notifyListeners();
+  }
+
+  /// 收集诊断信息（路径 / 是否存在 / 平台），便于远程排查。
+  Future<String> collectDiagnostics() async {
+    final lines = <String>[
+      'MP4Fix 诊断信息',
+      '平台: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
+      '设置: 阈值 ${settings.thresholdMb}MB · 含可优化=${settings.includeOptimizable}',
+      '输出目标: $outputDescription',
+    ];
+    if (AndroidPlatform.isSupported) {
+      lines.add('输出(SAF): ${settings.outputTreeUri ?? "（未选择 → 默认 下载/MP4Fix）"}');
+    } else {
+      final dir = settings.outputDirPath;
+      lines.add('输出目录: ${dir ?? "（未选择 → 默认 应用文档目录/MP4Fix）"}');
+      if (dir != null) lines.add('输出目录存在: ${Directory(dir).existsSync()}');
+      final scan = settings.scanInputDirPath;
+      lines.add('输入目录: ${scan ?? "-"}');
+      if (scan != null) lines.add('输入目录存在: ${Directory(scan).existsSync()}');
+    }
+    try {
+      final docs = await getApplicationDocumentsDirectory();
+      lines.add('应用文档目录: ${docs.path}（存在: ${docs.existsSync()}）');
+      final tmp = await getTemporaryDirectory();
+      lines.add('临时目录: ${tmp.path}（存在: ${tmp.existsSync()}）');
+    } catch (e) {
+      lines.add('目录查询失败: ${describeError(e)}');
+    }
+    lines.add('临时缓存: ${(_cacheDir?.path) ?? "（未初始化）"}');
+    return lines.join('\n');
   }
 
   void updateSettings(void Function(AppSettings s) mutate) {
@@ -210,6 +252,7 @@ class AppController extends ChangeNotifier {
 
   /// 选择输出文件夹（Android 走 SAF，桌面走目录选择）。
   Future<void> pickOutputFolder() async {
+    lastNotice = null;
     if (AndroidPlatform.isSupported) {
       final dir = await SafUtil().pickDirectory(
         writePermission: true,
@@ -221,13 +264,18 @@ class AppController extends ChangeNotifier {
       return;
     }
     final path = await FilePicker.getDirectoryPath();
-    if (path != null) {
-      updateSettings((s) => s.outputDirPath = path);
+    if (path == null) return;
+    final normalized = normalizePickedPath(path);
+    updateSettings((s) => s.outputDirPath = normalized);
+    if (!Directory(normalized).existsSync()) {
+      lastNotice = '所选文件夹当前不可访问：$normalized';
+      notifyListeners();
     }
   }
 
   /// 选择"文件夹批量检测"的输入目录。
   Future<void> pickScanInputFolder() async {
+    lastNotice = null;
     if (AndroidPlatform.isSupported) {
       final dir = await SafUtil().pickDirectory();
       if (dir != null) {
@@ -236,8 +284,12 @@ class AppController extends ChangeNotifier {
       return;
     }
     final path = await FilePicker.getDirectoryPath();
-    if (path != null) {
-      updateSettings((s) => s.scanInputDirPath = path);
+    if (path == null) return;
+    final normalized = normalizePickedPath(path);
+    updateSettings((s) => s.scanInputDirPath = normalized);
+    if (!Directory(normalized).existsSync()) {
+      lastNotice = '所选文件夹当前不可访问：$normalized';
+      notifyListeners();
     }
   }
 
@@ -246,6 +298,7 @@ class AppController extends ChangeNotifier {
   /// 选择本地视频（多选）。
   Future<void> pickLocalFiles() async {
     if (running) return;
+    lastNotice = null;
     final files = await FilePicker.pickFiles(
       type: FileType.custom,
       allowedExtensions: const ['mp4', 'm4v', 'mov'],
@@ -263,6 +316,7 @@ class AppController extends ChangeNotifier {
         );
       }
       if (path == null) continue;
+      path = normalizePickedPath(path);
       created.add(_newJob(
         source: JobSource.local,
         name: f.name,
@@ -317,6 +371,7 @@ class AppController extends ChangeNotifier {
   /// 扫描输入目录（可选修复）。Android 走 SAF 递归 + 缓存复制；桌面直接读目录。
   Future<void> scanFolder({bool fixAfterScan = false}) async {
     if (running) return;
+    lastNotice = null;
     final targets = <FixJob>[];
     try {
       await _scanFolderInner(targets);
@@ -373,21 +428,20 @@ class AppController extends ChangeNotifier {
         throw StateError('请先选择输入文件夹');
       }
       _setRunning(JobSource.folder);
-      final dir = Directory(dirPath);
-      final files = dir
-          .listSync(recursive: true, followLinks: false)
-          .whereType<File>()
-          .where((f) => _isVideoName(f.path.split('/').last))
-          .toList();
-      for (final f in files) {
+      // 目录列举放到后台 Isolate：网络盘 / 大目录下 listSync 会把界面卡死；
+      // 且逐个目录容忍失败（Windows 的 System Volume Information / junction 会拒绝访问）
+      final listing = await Isolate.run(() => listVideosSync(dirPath));
+      if (listing.skipped > 0) {
+        lastNotice = '已跳过 ${listing.skipped} 个无法读取的文件夹（权限 / 系统目录）';
+        notifyListeners();
+      }
+      for (final f in listing.files) {
         if (_cancelRequested) break;
-        final name = f.path.split('/').last;
-        final rel = f.path.substring(dir.path.length).replaceFirst(RegExp(r'^/+'), '');
         final job = _newJob(
           source: JobSource.folder,
-          name: name,
-          displayPath: rel,
-          size: f.lengthSync(),
+          name: f.path.split(Platform.pathSeparator).last,
+          displayPath: f.rel,
+          size: f.size,
           localPath: f.path,
         );
         targets.add(job);
