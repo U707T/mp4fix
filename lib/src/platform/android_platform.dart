@@ -146,6 +146,23 @@ class AndroidPlatform {
     }
   }
 
+  /// 读取上一次未捕获的 Java/Kotlin 异常（时间戳 + 堆栈）；没有则返回 null。
+  ///
+  /// "点一下扫描就闪退"这类系统级崩溃完全发生在 Dart 之外 —— 靠这张底牌远程排查。
+  static Future<({String text, int time})?> readLastCrash() async {
+    try {
+      final raw =
+          await _channel.invokeMethod<Map<Object?, Object?>>('readLastCrash');
+      if (raw == null) return null;
+      final text = raw['text'];
+      final time = (raw['time'] as num?)?.toInt() ?? 0;
+      if (text is! String || text.isEmpty) return null;
+      return (text: text, time: time);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 开启任务前台服务（Android 12+ 防止批量修复在后台被冻结）。
   ///
   /// 失败时静默忽略 —— 服务只是"加分项"，任务本身照常运行。

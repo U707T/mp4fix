@@ -71,6 +71,24 @@ void main() {
     expect(report.audioSamples, 189);
   });
 
+  test('readLastCrash：解析平台返回的崩溃记录', () async {
+    mock((call) async {
+      expect(call.method, 'readLastCrash');
+      return {
+        'text': 'android.app.RemoteServiceException: boom\n\tat a.b(c.java:1)',
+        'time': 123456789,
+      };
+    });
+    final crash = await AndroidPlatform.readLastCrash();
+    expect(crash?.text, contains('boom'));
+    expect(crash?.time, 123456789);
+  });
+
+  test('readLastCrash：没有记录返回 null（不打扰用户）', () async {
+    mock((call) async => null);
+    expect(await AndroidPlatform.readLastCrash(), isNull);
+  });
+
   test('prefetchForInspect：not_seekable → SafNotSeekableException', () async {
     mock((call) async {
       throw PlatformException(code: 'not_seekable', message: 'pipe');

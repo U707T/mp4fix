@@ -4,12 +4,14 @@ import android.content.ContentUris
 import android.content.ContentValues
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.MediaStore
+import android.util.Log
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
@@ -30,6 +32,33 @@ import java.nio.channels.FileChannel
  *  2) 把 `content://` 输入复制到应用缓存，供纯 Dart 引擎随机读取。
  */
 class MainActivity : FlutterActivity() {
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        installCrashLogger()
+    }
+
+    /**
+     * 把未捕获的 Java/Kotlin 异常写进 `filesDir/crash_last.txt`，
+     * 供界面「复制诊断信息」读取。
+     *
+     * 像"点一下扫描就闪退"这类系统级崩溃（例如 RemoteServiceException）
+     * 完全发生在 Dart 之外，只能靠这张底牌远程排查。
+     */
+    private fun installCrashLogger() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                File(filesDir, CRASH_FILE).writeText(
+                    "time=" + System.currentTimeMillis() + "\n" +
+                        Log.getStackTraceString(throwable),
+                )
+            } catch (_: Throwable) {
+                // 忽略：记录崩溃不能引发新的崩溃
+            }
+            previous?.uncaughtException(thread, throwable)
+        }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -138,6 +167,19 @@ class MainActivity : FlutterActivity() {
             "stopTaskService" -> {
                 TaskService.stop(this)
                 result.success(null)
+            }
+
+            "readLastCrash" -> {
+                val crash = try {
+                    val f = File(filesDir, CRASH_FILE)
+                    if (!f.exists()) null else mapOf(
+                        "text" to f.readText(),
+                        "time" to f.lastModified(),
+                    )
+                } catch (_: Exception) {
+                    null
+                }
+                result.success(crash)
             }
 
             else -> result.notImplemented()
@@ -539,5 +581,6 @@ class MainActivity : FlutterActivity() {
         private const val MAX_MOOF = 64L shl 20 // 单个 moof 上限 64MB
         private const val MAX_FRAGMENTS = 20000 // 预取 moof 个数上限
         private const val MAX_BOX_COUNT = 50000 // 盒扫描保护上限
+        private const val CRASH_FILE = "crash_last.txt" // 上一次未捕获异常（诊断用）
     }
 }

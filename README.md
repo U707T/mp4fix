@@ -80,7 +80,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 - **SAF 写入的数据安全**：`name.mp4fix-part` → 校验大小 → **同名旧文件改名为 `.mp4fix-bak` 让位**
   （而不是先删）→ 改名转正 → 清理备份；任一步失败都会还原旧文件，消除「旧文件已删、新文件没写成」的窗口。
 
-## 测试（96 项，`flutter test`）
+## 测试（98 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -112,7 +112,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（96 项：引擎 / 无损 / 金标准 / 分片 / WebDAV …）
+flutter test                     # 全部测试（98 项：引擎 / 无损 / 金标准 / 分片 / WebDAV …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -127,8 +127,22 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 96 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 98 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.5.2 · 修复 Android「一按扫描就闪退」）
+
+- **根因**：批量任务开始时会把一个"前台服务"拉起来做保活；此前用 `startForegroundService()`
+  启动 —— 一旦服务因厂商 ROM 限制 / 系统策略等**没能或来不及调用 `startForeground()` 就被结束**，
+  Android 会**直接杀掉整个应用**（AOSP 原话："Bringing down service while still waiting for
+  start foreground: That is not allowed."）→ 表现为**点下「扫描」就闪退**（「测试连接」不开
+  服务，所以一切正常，极具迷惑性）；
+- **修复**：改为 `startService()` + 服务内「**尽力升前台**」：升成功 = 和以前一样的保活；
+  失败 = **安静降级为普通后台服务**（等同旧版行为，任务照跑）—— 系统级崩溃路径彻底移除；
+  另加最小兜底通知（不依赖自定义资源）与 Android 15+ dataSync 超时回调；
+- **诊断（新）**：未捕获的系统级异常会写进 `crash_last.txt`，下次启动提示、并附在
+  「设置 → 复制诊断信息」里（这类崩溃完全发生在 Dart 之外，之前远程无从排查）；
+- 测试 96 → 98。
 
 ## 本版要点（v2.5.1 · 全面审查：该修的修、该优化的优化）
 
@@ -146,7 +160,7 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
   （8 分片：24 → 9 个请求；283 分片量级：约 850 → 约 290）；
 - **修复**：WebDAV 表单主机栏直接粘贴整串地址（`http://host:port/path`）现在能正确拆开（旧版行为回归）；
 - **修复**：引擎错误进入界面时不再带 `RepairException:` 前缀；
-- 测试 91 → 96：批量选择规则 / 平台预取协议（含 `not_seekable` 降级）/ URL 拆分 / 错误文案。
+- 测试 91 → 96（v2.5.1）：批量选择规则 / 平台预取协议（含 `not_seekable` 降级）/ URL 拆分 / 错误文案。
 
 ## 本版要点（v2.5.0 · 分片（fragmented）MP4 支持）
 

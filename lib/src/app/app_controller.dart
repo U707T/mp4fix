@@ -141,6 +141,16 @@ class AppController extends ChangeNotifier {
       webDavPassword = settings.webDavPassword;
     }
     await _initLedger();
+    // 上次运行若有未捕获异常（系统级崩溃没法从 Dart 侧看到），提示一下：
+    // 详情在「设置 → 复制诊断信息」里（24 小时内的才算"最近"）。
+    if (AndroidPlatform.isSupported) {
+      final crash = await AndroidPlatform.readLastCrash();
+      if (crash != null &&
+          DateTime.now().millisecondsSinceEpoch - crash.time <
+              const Duration(hours: 24).inMilliseconds) {
+        lastNotice = '检测到上次运行异常退出（「设置 → 复制诊断信息」可查看详情）';
+      }
+    }
     // 上次会话留下的导入副本没用了（任务列表不跨会话），开一次就清掉，别让缓存越滚越大
     unawaited(_cleanStaleCaches());
     // 桌面：提前建好默认输出目录，避免首次修复因"目录不存在"失败
@@ -232,6 +242,18 @@ class AppController extends ChangeNotifier {
       lines.add('目录查询失败: ${describeError(e)}');
     }
     lines.add('临时缓存: ${(_cacheDir?.path) ?? "（未初始化）"}');
+    if (AndroidPlatform.isSupported) {
+      final crash = await AndroidPlatform.readLastCrash();
+      if (crash != null) {
+        final when = DateTime.fromMillisecondsSinceEpoch(crash.time);
+        final body = crash.text.length > 4000
+            ? crash.text.substring(0, 4000)
+            : crash.text;
+        lines.add('最近一次未捕获异常（$when）：\n$body');
+      } else {
+        lines.add('最近一次未捕获异常：无');
+      }
+    }
     return lines.join('\n');
   }
 
