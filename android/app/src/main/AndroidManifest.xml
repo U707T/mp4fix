@@ -2,6 +2,13 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!--
+      批量修复期间的前台服务（dataSync）：Android 12+ 会很快冻结后台的缓存进程，
+      长任务（几 GB 的本地修复 / WebDAV 传输）切到后台就会被挂起。低优先级通知
+      不打扰用户；没有 POST_NOTIFICATIONS 也能跑（只是通知不显示）。
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!--
       Android 17（API 37）起启用「本地网络保护」(LNP)：targetSdk >= 37 的应用若没有该权限，
       系统会静默丢弃发往局域网（私有地址）的数据包，表现为连接超时（访问公网却正常）。
       低版本系统不认识该权限，声明了也没有副作用。
@@ -11,7 +18,10 @@
     <application
         android:label="MP4 修复器"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true">
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -34,6 +44,12 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+
+        <!-- 任务是"数据同步/计算"类工作，声明 dataSync 类型（见 TaskService 注释） -->
+        <service
+            android:name=".TaskService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

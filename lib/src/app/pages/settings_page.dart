@@ -11,7 +11,7 @@ class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
   /// 与 pubspec.yaml 的 version 保持一致。
-  static const String appVersion = '2.4.1';
+  static const String appVersion = '2.4.2';
 
   @override
   Widget build(BuildContext context) {
@@ -163,13 +163,15 @@ class SettingsPage extends StatelessWidget {
                 title: const Text('清理临时文件'),
                 subtitle: const Text('删除导入缓存与修复中间产物（不影响已保存的结果）'),
                 trailing: const Icon(Icons.delete_outline_rounded),
-                onTap: () => guardUi(context, () async {
-                  await controller.cleanCache();
-                  if (!context.mounted) return;
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('已清理临时文件')),
-                  );
-                }),
+                onTap: canEdit
+                    ? () => guardUi(context, () async {
+                        await controller.cleanCache();
+                        if (!context.mounted) return;
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('已清理临时文件')),
+                        );
+                      })
+                    : null,
               ),
               ListTile(
                 dense: true,

@@ -73,6 +73,36 @@ jobs:
           mv build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk MP4Fix-release-armeabi-v7a.apk
           mv build/app/outputs/flutter-apk/app-arm64-v8a-release.apk MP4Fix-release-arm64-v8a.apk
           mv build/app/outputs/flutter-apk/app-x86_64-release.apk MP4Fix-release-x86_64.apk
+      # Android 15+ 的 16KB 页大小兼容：APK 内 .so 必须页对齐，且 ELF LOAD 段 ≥ 16KB。
+      # 构建配置早就满足（NDK r28 + AGP 9），这里把它固化成发布前的硬门槛，防止回归。
+      - name: Verify 16 KB page-size compatibility (Android 15+)
+        run: |
+          BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)
+          ZIPALIGN="$ANDROID_HOME/build-tools/$BT/zipalign"
+          for apk in MP4Fix-release-arm64-v8a.apk MP4Fix-release-x86_64.apk; do
+            if "$ZIPALIGN" -h 2>&1 | grep -q -- " -P "; then
+              "$ZIPALIGN" -c -P 16 -v 4 "$apk" > /dev/null \
+                || { echo "::error::$apk 内的 .so 未按 16KB 对齐"; exit 1; }
+            fi
+          done
+          rm -rf /tmp/apk-align && mkdir -p /tmp/apk-align
+          unzip -q MP4Fix-release-arm64-v8a.apk -d /tmp/apk-align 'lib/arm64-v8a/*'
+          unzip -q MP4Fix-release-x86_64.apk -d /tmp/apk-align 'lib/x86_64/*'
+          python3 - <<'PY'
+          import glob, subprocess, sys
+          bad = []
+          for so in glob.glob('/tmp/apk-align/lib/**/*.so', recursive=True):
+              out = subprocess.check_output(['readelf', '-lW', so], text=True)
+              for line in out.splitlines():
+                  if line.strip().startswith('LOAD'):
+                      align = int(line.split()[-1], 16)
+                      if align < 0x4000:
+                          bad.append((so, hex(align)))
+          if bad:
+              print('未按 16KB 对齐的库：', bad)
+              sys.exit(1)
+          print('16KB 兼容检查通过：APK 对齐 + ELF LOAD 段均 >= 16KB')
+          PY
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:

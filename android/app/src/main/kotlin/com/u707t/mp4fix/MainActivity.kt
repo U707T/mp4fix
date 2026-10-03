@@ -102,6 +102,31 @@ class MainActivity : FlutterActivity() {
                 result.success(exists)
             }
 
+            "startTaskService" -> {
+                TaskService.start(
+                    this,
+                    call.argument<String>("title") ?: "MP4 修复器",
+                    call.argument<String>("text") ?: "",
+                    call.argument<Int>("progress") ?: -1,
+                )
+                result.success(null)
+            }
+
+            "updateTaskService" -> {
+                TaskService.update(
+                    this,
+                    call.argument<String>("title") ?: "MP4 修复器",
+                    call.argument<String>("text") ?: "",
+                    call.argument<Int>("progress") ?: -1,
+                )
+                result.success(null)
+            }
+
+            "stopTaskService" -> {
+                TaskService.stop(this)
+                result.success(null)
+            }
+
             else -> result.notImplemented()
         }
     }

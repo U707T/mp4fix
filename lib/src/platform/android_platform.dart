@@ -101,4 +101,49 @@ class AndroidPlatform {
       return true;
     }
   }
+
+  /// 开启任务前台服务（Android 12+ 防止批量修复在后台被冻结）。
+  ///
+  /// 失败时静默忽略 —— 服务只是"加分项"，任务本身照常运行。
+  static Future<void> startTaskService({
+    required String title,
+    required String text,
+    int progress = -1,
+  }) async {
+    try {
+      await _channel.invokeMethod<void>('startTaskService', {
+        'title': title,
+        'text': text,
+        'progress': progress,
+      });
+    } catch (_) {
+      // 忽略
+    }
+  }
+
+  /// 更新通知里的进度文案。
+  static Future<void> updateTaskService({
+    required String title,
+    required String text,
+    int progress = -1,
+  }) async {
+    try {
+      await _channel.invokeMethod<void>('updateTaskService', {
+        'title': title,
+        'text': text,
+        'progress': progress,
+      });
+    } catch (_) {
+      // 忽略
+    }
+  }
+
+  /// 结束后台任务服务。
+  static Future<void> stopTaskService() async {
+    try {
+      await _channel.invokeMethod<void>('stopTaskService');
+    } catch (_) {
+      // 忽略
+    }
+  }
 }

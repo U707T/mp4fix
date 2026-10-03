@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 及以下（API ≤ 30）的备份规则。
+  settings.json 里可能存着明文 WebDAV 密码，不进云备份 / adb backup；
+  修复记录只对本机有参考价值，同样排除。
+-->
+<full-backup-content>
+    <exclude domain="file" path="settings.json" />
+    <exclude domain="file" path="repair_ledger.json" />
+</full-backup-content>

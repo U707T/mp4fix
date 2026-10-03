@@ -123,7 +123,27 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 2. push 到 `main` → CI 自动：`test`（analyze + 79 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
 
-## 本版要点（v2.4.1）
+## 本版要点（v2.4.2 · 全量代码审查 / 平台适配）
+
+- **Android 16+（API 36/37）适配**
+  - 预测性返回：声明 `android:enableOnBackInvokedCallback="true"`（Flutter 3.47 引擎内建 `OnBackInvokedCallback`
+    支持；Android 16 起系统对 targetSdk 36+ 的应用默认启用预测性返回）；
+  - **16KB 页大小**：NDK r28 + AGP 9 默认 16KB 对齐（实测 `libflutter.so` 64KB、`libdartjni.so` 16KB，
+    APK 内 `.so` 偏移均为 16384 的倍数）；CI 新增**发布前硬校验**（zipalign -P 16 + ELF LOAD 段检查）防止回归；
+  - 长任务**前台服务**（`dataSync` + 低优先级进度通知）：Android 12+ 的缓存冻结不会再把批量修复 /
+    WebDAV 传输挂起；系统限制后台启动时安静降级，不影响主流程；
+  - 备份规则：`settings.json`（可能含明文 WebDAV 密码）与修复记录**不进云备份 / 设备迁移**；
+  - 边到边（Android 15+ 强制）与「大屏忽略方向/尺寸限制」：复查无残余问题（系统栏由 AppBar / NavigationBar 处理）。
+- **Windows**
+  - 取消修复后不再因为临时文件被占用而把整批任务带崩（删除失败静默忽略，留给「清理临时文件」）；
+  - 拖入大量文件时合并界面刷新（避免刷新风暴）。
+- **通用修复（审查发现）**
+  - 进度条：被跳过的任务也会推进总数（此前会停在 N-1）；
+  - 文件夹 / WebDAV 列表改为**惰性构建**（几千个文件不再一次性建出全部界面）；
+  - 「清理临时文件」也会清掉**文件选择器的缓存**，且任务运行中禁止清理；
+  - 每次启动自动清理上次会话的导入副本（任务列表不跨会话）。
+
+### v2.4.1
 
 - 修复「汇总条」按钮行在窄屏 / 大字号下可能溢出的隐患：一键操作单独一行、右对齐并可自动换行；
 - 本地文件页在桌面端会显示完整路径（同名文件在不同文件夹时一眼可分）。

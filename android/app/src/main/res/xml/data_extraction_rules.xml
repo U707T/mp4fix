@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+（API ≥ 31）的备份 / 设备迁移规则，意图与 backup_rules.xml 相同：
+  不把可能含明文 WebDAV 密码的 settings.json 与修复记录带出本机。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="settings.json" />
+        <exclude domain="file" path="repair_ledger.json" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="settings.json" />
+        <exclude domain="file" path="repair_ledger.json" />
+    </device-transfer>
+</data-extraction-rules>

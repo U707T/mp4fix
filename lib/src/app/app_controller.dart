@@ -47,12 +47,36 @@ class AppController extends ChangeNotifier {
   void _setBatch(int total) {
     batchTotal = total;
     batchDone = 0;
+    _notifyTaskService(force: true);
     notifyListeners();
   }
 
   void _tickBatch(int done) {
     batchDone = done;
+    _notifyTaskService();
     notifyListeners();
+  }
+
+  /// 任务前台服务的标题（Android；供通知使用）。
+  String _taskTitle = '';
+
+  int _lastServiceNotifyAt = 0;
+
+  /// 同步进度到前台服务通知（最多 2 次/秒；总量未知时只显示转圈）。
+  void _notifyTaskService({bool force = false}) {
+    if (!AndroidPlatform.isSupported || _runningSource == null) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!force && now - _lastServiceNotifyAt < 500) return;
+    _lastServiceNotifyAt = now;
+    final done = batchDone;
+    final total = batchTotal;
+    unawaited(
+      AndroidPlatform.updateTaskService(
+        title: _taskTitle.isEmpty ? 'MP4 修复器' : _taskTitle,
+        text: total > 0 ? '已完成 $done/$total' : '正在处理…',
+        progress: total > 0 ? ((done / total) * 100).round() : -1,
+      ),
+    );
   }
 
   bool get running => _runningSource != null;
@@ -105,6 +129,8 @@ class AppController extends ChangeNotifier {
       webDavPassword = settings.webDavPassword;
     }
     await _initLedger();
+    // 上次会话留下的导入副本没用了（任务列表不跨会话），开一次就清掉，别让缓存越滚越大
+    unawaited(_cleanStaleCaches());
     // 桌面：提前建好默认输出目录，避免首次修复因"目录不存在"失败
     if (!AndroidPlatform.isSupported) {
       try {
@@ -225,6 +251,7 @@ class AppController extends ChangeNotifier {
     String? webDavUrl,
     String? sourceUri,
     int modifiedMs = 0,
+    bool notify = true,
   }) {
     final job = FixJob(
       id: '${DateTime.now().microsecondsSinceEpoch}-${_seq++}',
@@ -238,7 +265,7 @@ class AppController extends ChangeNotifier {
       modifiedMs: modifiedMs,
     );
     jobs.add(job);
-    notifyListeners();
+    if (notify) notifyListeners();
     return job;
   }
 
@@ -290,10 +317,41 @@ class AppController extends ChangeNotifier {
   void _setRunning(JobSource? source) {
     _runningSource = source;
     _cancelRequested = false;
+    if (AndroidPlatform.isSupported) {
+      if (source == null) {
+        unawaited(AndroidPlatform.stopTaskService());
+      } else {
+        _taskTitle = 'MP4 修复器 · ${_sourceLabel(source)}';
+        unawaited(
+          AndroidPlatform.startTaskService(
+            title: _taskTitle,
+            text: '正在处理…',
+          ),
+        );
+      }
+    }
     notifyListeners();
   }
 
+  static String _sourceLabel(JobSource source) => switch (source) {
+        JobSource.local => '本地文件',
+        JobSource.folder => '文件夹批量',
+        JobSource.webdav => 'WebDAV',
+      };
+
   String _message(Object e) => describeError(e);
+
+  /// 删除临时文件（尽力而为）。
+  ///
+  /// Windows 上文件可能被其它进程 / 刚被取消的修复 Isolate 占用，删除失败
+  /// 不能把整批任务带崩；留下的文件会在「清理临时文件」里被清掉。
+  void _quietDeleteFile(File file) {
+    try {
+      if (file.existsSync()) file.deleteSync();
+    } catch (_) {
+      // 忽略
+    }
+  }
 
   /// 供 [WebDavFixer] 使用的修复执行器：在后台 Isolate 中跑引擎，避免卡住界面。
   Future<void> _isolateRepair({
@@ -311,7 +369,7 @@ class AppController extends ChangeNotifier {
     try {
       await task.done;
     } catch (_) {
-      if (output.existsSync()) output.deleteSync();
+      _quietDeleteFile(output);
       rethrow;
     } finally {
       if (identical(_activeRepair, task)) _activeRepair = null;
@@ -622,6 +680,7 @@ class AppController extends ChangeNotifier {
         try {
           final listing = await Isolate.run(() => listVideosSync(path));
           for (final f in listing.files) {
+            // 批量导入先不逐条通知（拖入几百个文件时避免刷新风暴），最后统一通知
             created.add(
               _newJob(
                 source: JobSource.local,
@@ -630,6 +689,7 @@ class AppController extends ChangeNotifier {
                 size: f.size,
                 localPath: f.path,
                 modifiedMs: f.modifiedMs,
+                notify: false,
               ),
             );
           }
@@ -647,6 +707,7 @@ class AppController extends ChangeNotifier {
             size: file.lengthSync(),
             localPath: path,
             modifiedMs: _modifiedMs(file),
+            notify: false,
           ),
         );
       }
@@ -1165,7 +1226,13 @@ class AppController extends ChangeNotifier {
         final job = targets[wi];
         if (_cancelRequested) break;
         final item = _webDavItems[job.id];
-        if (item == null) continue;
+        if (item == null) {
+          job.status = JobStatus.failed;
+          job.message = '扫描信息已清空，请重新扫描';
+          _tickBatch(wi + 1);
+          notifyListeners();
+          continue;
+        }
         job.status = JobStatus.fixing;
         job.progress = 0;
         job.message = uploadCopies ? '准备上传副本…' : '准备保存到本地…';
@@ -1233,7 +1300,7 @@ class AppController extends ChangeNotifier {
               }
             }
           } finally {
-            if (tmp.existsSync()) tmp.deleteSync();
+            if (tmp.existsSync()) _quietDeleteFile(tmp);
           }
         }
         job.progress = 0;
@@ -1303,6 +1370,7 @@ class AppController extends ChangeNotifier {
         if (inputPath == null) {
           job.status = JobStatus.failed;
           job.message = '缺少本地文件';
+          _tickBatch(index + 1);
           notifyListeners();
           continue;
         }
@@ -1354,7 +1422,7 @@ class AppController extends ChangeNotifier {
               : JobStatus.failed;
           job.message = job.status == JobStatus.cancelled ? '已取消' : _message(e);
         } finally {
-          if (tmp.existsSync()) tmp.deleteSync();
+          if (tmp.existsSync()) _quietDeleteFile(tmp);
         }
         job.progress = 0;
         _tickBatch(index + 1);
@@ -1363,21 +1431,66 @@ class AppController extends ChangeNotifier {
       _setRunning(null);
       batchDone = 0;
       batchTotal = 0;
+      // 文件夹任务：修完的导入副本可以删了（重做会重新复制）
+      if (source == JobSource.folder) await _cleanupImportedCopies(targets);
       notifyListeners();
       await flushLedger();
     }
   }
 
-  /// 清理临时文件：工作目录（修复中间产物）+ Android 侧的导入缓存（content:// 复制件）。
+  /// 清理「上次会话留下的导入副本」。
   ///
-  /// 导入缓存由平台通道写进应用缓存目录的 `imports/`，与工作目录同级 ——
-  /// 之前只清 `work/`，导致导入的整份视频副本长期占空间。
+  /// 任务列表不跨会话，所以启动时这两处缓存都是纯垃圾：
+  ///  - 平台通道复制进来的 `imports/`（文件夹扫描用的整份视频副本）；
+  ///  - 文件选择器自己的缓存 `<cache>/file_picker/`。
+  Future<void> _cleanStaleCaches() async {
+    try {
+      final tmp = await getTemporaryDirectory();
+      _deleteContents(Directory('${tmp.path}/imports'));
+    } catch (_) {
+      // 忽略
+    }
+    try {
+      await FilePicker.clearTemporaryFiles();
+    } catch (_) {
+      // 桌面 / 不支持的平台会直接返回
+    }
+  }
+
+  /// Android：文件夹任务的导入副本（整份视频）在修复成功后就没用了 ——
+  /// 「重做」会按 [FixJob.sourceUri] 重新复制，继续留着只会把缓存撑大。
+  Future<void> _cleanupImportedCopies(Iterable<FixJob> targets) async {
+    if (!AndroidPlatform.isSupported) return;
+    try {
+      final tmp = await getTemporaryDirectory();
+      final prefix =
+          '${tmp.path}${Platform.pathSeparator}imports${Platform.pathSeparator}';
+      for (final job in targets) {
+        if (!job.status.finished) continue;
+        final path = job.localPath;
+        if (path == null || !path.startsWith(prefix)) continue;
+        _quietDeleteFile(File(path));
+        job.localPath = null;
+      }
+    } catch (_) {
+      // 忽略
+    }
+  }
+
+  /// 清理临时文件：工作目录（修复中间产物）+ 导入缓存（content:// 复制件）
+  /// + 文件选择器缓存。任务运行中不动（否则会删掉正在读的中间文件）。
   Future<void> cleanCache() async {
+    if (running) return;
     final cache = await _cache();
     _deleteContents(cache);
     try {
       final tmp = await getTemporaryDirectory();
       _deleteContents(Directory('${tmp.path}/imports'));
+    } catch (_) {
+      // 忽略
+    }
+    try {
+      await FilePicker.clearTemporaryFiles();
     } catch (_) {
       // 忽略
     }
