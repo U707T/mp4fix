@@ -352,6 +352,7 @@ class _WebDavPageState extends State<WebDavPage> {
           jobs: all,
           active: busy ? controller.batchDone : null,
           total: busy ? controller.batchTotal : null,
+          fixableCount: controller.fixableCount(JobSource.webdav),
           onFixAll: canRun && controller.hasFixable(JobSource.webdav)
               ? () => _guard(() => controller.fixWebDavJobs())
               : null,

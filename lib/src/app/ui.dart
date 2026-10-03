@@ -60,9 +60,9 @@ Future<void> runProcessAll(
   }
 
   await guardUi(
-    context,
-    () => source == JobSource.webdav
-        ? controller.fixWebDavJobs(processAll: true)
-        : controller.fixJobs(source, null, true),
+  context,
+  () => source == JobSource.webdav
+      ? controller.fixWebDavJobs(processAll: true)
+      : controller.fixJobs(source, processAll: true),
   );
 }

@@ -114,11 +114,15 @@ class PrefetchedSeekableInput implements SeekableInput {
 
 /// 预取"检测所需区域"，返回可直接交给 [Mp4Inspect] 的输入。
 ///
-/// 算法：从 0 开始逐个扫描顶层盒子（每次只取 16 字节头部），遇到 `moov` 则把整个
-/// moov 取回；分片 MP4 的每个 `moof`（movie fragment）也整盒取回 —— 引擎靠它读出
-/// 样本大小 / 时长 / 交错距离。其他盒（`mdat` 等）只保留头部。
-/// 几 GB 的普通远端文件通常只需"顶层盒头 ×N + moov"的流量；分片 MP4 会多出
-/// "moof × 分片数"（每个通常仅几 KB）的流量，仍远小于整档下载。
+/// 算法：从 0 开始顺序扫描顶层盒子，**按窗口取回**（默认 16KB）：
+///  - 先取一个窗口，窗口里的字节天然覆盖「连续几个小盒」（ftyp / moov / mdat 头…）；
+///  - `moov` 整盒取回；分片 MP4 的每个 `moof` 也整盒取回（引擎靠它读出样本
+///    大小 / 时长 / 交错距离）；
+///  - 窗口内已覆盖的区域直接复用 —— 分片文件（moof 通常只有几百字节）每个
+///    分片只有 1 个请求，而不是头部 + 载荷 + mdat 头 3 个。
+///
+/// 几 GB 的普通远端文件通常只需个位数请求；分片 MP4 会多出"每个分片 1 个请求、
+/// 每个窗口几 KB~16KB"的流量，仍远小于整档下载。
 Future<PrefetchedSeekableInput> prefetchForInspect(
   WebDavClient client,
   String url, {
@@ -126,59 +130,85 @@ Future<PrefetchedSeekableInput> prefetchForInspect(
   int maxMoovBytes = 256 << 20,
   int maxMoofBytes = 64 << 20,
   int maxFragments = 20000,
+  int windowBytes = 16 << 10,
   bool Function()? isCancelled,
 }) async {
   final ranges = <PrefetchRange>[];
   var pos = 0;
   var boxCount = 0;
   var moofCount = 0;
+
+  // 最近取回的连续窗口（顺序扫描时用来"顺路"覆盖后面的小盒）
+  Uint8List? cover;
+  var coverStart = 0;
+  var coverEnd = 0;
+
+  Future<void> ensureCover(int start) async {
+    if (cover != null && start >= coverStart && start < coverEnd) return;
+    final endInclusive = start + windowBytes - 1 < fileSize - 1
+        ? start + windowBytes - 1
+        : fileSize - 1;
+    final bytes = await client.getRange(url, start, endInclusive);
+    if (bytes.isEmpty) throw WebDavException('预取读取为空（服务器异常？）');
+    cover = bytes;
+    coverStart = start;
+    coverEnd = start + bytes.length;
+    ranges.add(PrefetchRange(start, bytes));
+  }
+
   while (pos + 8 <= fileSize) {
     if (isCancelled?.call() ?? false) throw WebDavException('已取消');
     if (++boxCount > 50000) break; // 异常文件保护
-    final end = pos + 15 < fileSize - 1 ? pos + 15 : fileSize - 1;
-    final hdr = await client.getRange(url, pos, end);
-    if (hdr.length < 8) break;
-    var size = u32(hdr, 0);
+    await ensureCover(pos);
+
+    final off = pos - coverStart;
+    final avail = coverEnd - pos;
+    if (avail < 8) break;
+    var size = u32(cover!, off);
     var header = 8;
-    final type = fourcc(hdr, 4);
+    final type = fourcc(cover!, off + 4);
     if (size == 1) {
-      if (hdr.length < 16) break;
-      size = u64(hdr, 8);
+      if (avail < 16) break;
+      size = u64(cover!, off + 8);
       header = 16;
     } else if (size == 0) {
       size = fileSize - pos;
     }
-    ranges.add(PrefetchRange(pos, Uint8List.fromList(
-      Uint8List.sublistView(hdr, 0, header < hdr.length ? header : hdr.length),
-    )));
-    if (size < header || pos + size > fileSize) break; // 容忍尾部垃圾
-    if (type == 'moov') {
-      if (size - header > maxMoovBytes) {
+    if (size < header || pos + size > fileSize) break; // 容忍尾部垃圾（引擎同样）
+
+    if (type == 'moov' || type == 'moof') {
+      if (type == 'moov' && size - header > maxMoovBytes) {
         throw WebDavException(
           'moov 过大（${formatBytes(size - header)}），已跳过远程检测',
         );
       }
-      if (size > header) {
-        final payload =
-            await client.getRange(url, pos + header, pos + size - 1);
-        ranges.add(PrefetchRange(pos + header, payload));
+      if (type == 'moof') {
+        if (++moofCount > maxFragments) {
+          throw WebDavException(
+            '分片（fragmented）MP4 分片数过多（>$maxFragments），'
+            '已跳过远程检测（建议下载到本地处理）',
+          );
+        }
+        if (size - header > maxMoofBytes) {
+          throw WebDavException(
+            'moof 过大（${formatBytes(size - header)}），已跳过远程检测',
+          );
+        }
       }
-    } else if (type == 'moof') {
-      if (++moofCount > maxFragments) {
-        throw WebDavException(
-          '分片（fragmented）MP4 分片数过多（>$maxFragments），'
-          '已跳过远程检测（建议下载到本地处理）',
-        );
-      }
-      if (size - header > maxMoofBytes) {
-        throw WebDavException(
-          'moof 过大（${formatBytes(size - header)}），已跳过远程检测',
-        );
-      }
-      if (size > header) {
-        final payload =
-            await client.getRange(url, pos + header, pos + size - 1);
-        ranges.add(PrefetchRange(pos + header, payload));
+      // 补齐整盒（窗口可能不够；每段仍按窗口大小取，末段顺路多取一点）
+      final boxEnd = pos + size;
+      while (coverEnd < boxEnd) {
+        if (isCancelled?.call() ?? false) throw WebDavException('已取消');
+        final start2 = coverEnd;
+        final endInclusive = start2 + windowBytes - 1 < fileSize - 1
+            ? start2 + windowBytes - 1
+            : fileSize - 1;
+        final bytes = await client.getRange(url, start2, endInclusive);
+        if (bytes.isEmpty) throw WebDavException('预取读取为空（服务器异常？）');
+        cover = bytes;
+        coverStart = start2;
+        coverEnd = start2 + bytes.length;
+        ranges.add(PrefetchRange(start2, bytes));
       }
     }
     pos += size;

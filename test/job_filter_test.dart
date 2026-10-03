@@ -70,4 +70,37 @@ void main() {
     expect(JobStatus.ok.label, '正常');
     expect(JobStatus.needsFix.label, '需重排');
   });
+
+  test('批量修复选择：需重排总是处理；可优化看开关；正常看「全部处理」', () {
+    bool pick(JobStatus s, {bool includeOptimizable = false, bool processAll = false}) =>
+        shouldBatchFix(s, includeOptimizable: includeOptimizable, processAll: processAll);
+
+    // 需重排：任何设置下都处理
+    expect(pick(JobStatus.needsFix), isTrue);
+    expect(pick(JobStatus.needsFix, includeOptimizable: false), isTrue);
+
+    // 可优化：默认跳过；勾选「同时处理可优化」后处理
+    expect(pick(JobStatus.optimizable), isFalse);
+    expect(pick(JobStatus.optimizable, includeOptimizable: true), isTrue);
+
+    // 正常：只有「全部处理」才带上
+    expect(pick(JobStatus.ok), isFalse);
+    expect(pick(JobStatus.ok, includeOptimizable: true), isFalse);
+    expect(pick(JobStatus.ok, processAll: true), isTrue);
+
+    // 其他状态（损坏 / 失败 / 已修复 / 进行中）一律不进批量
+    for (final s in [
+      JobStatus.corrupt,
+      JobStatus.failed,
+      JobStatus.error,
+      JobStatus.reused,
+      JobStatus.saved,
+      JobStatus.inspecting,
+      JobStatus.pending,
+    ]) {
+      expect(pick(s), isFalse, reason: '$s 不应进入批量修复');
+      expect(pick(s, includeOptimizable: true, processAll: true), isFalse,
+          reason: '$s 不应进入批量修复（含全部处理）');
+    }
+  });
 }

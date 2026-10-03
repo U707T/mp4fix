@@ -215,9 +215,14 @@ class JobSummaryBar extends StatelessWidget {
     this.total,
     this.onFixAll,
     this.onProcessAll,
+    this.fixableCount,
   });
 
   final List<FixJob> jobs;
+
+  /// 「修复 N 项」按钮上的 N（由控制器按当前设置计算，含「同时处理可优化」开关）；
+  /// 为空时退回按「需重排 / 可优化」粗算。
+  final int? fixableCount;
 
   /// 批量任务进行中：已处理 / 总数（用于总进度条）。
   final int? active;
@@ -238,7 +243,7 @@ class JobSummaryBar extends StatelessWidget {
     int count(JobStatus s) => jobs.where((j) => j.status == s).length;
     final running = jobs.where((j) => j.status.busy).length;
     final pending = jobs.where((j) => j.status == JobStatus.pending).length;
-    final fixableCount = jobs.where((j) => j.status.fixable).length;
+    final fixableCount = this.fixableCount ?? jobs.where((j) => j.status.fixable).length;
     final doneCount = jobs.where((j) => j.status.finished).length;
     final problemCount = jobs.where((j) => j.status.problematic).length;
 

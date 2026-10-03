@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mp4fix/src/app/models.dart';
+import 'package:mp4fix/src/engine/engine.dart';
 
 /// 错误文案回归：常见 IO 错误给可操作的中文提示，其余剥掉异常类型前缀。
 void main() {
@@ -32,5 +33,7 @@ void main() {
   test('其余异常 → 去掉类型前缀', () {
     expect(describeError(StateError('请先选择输入文件夹')), '请先选择输入文件夹');
     expect(describeError(Exception('读取失败')), '读取失败');
+    // 引擎异常（RepairException）不应把类型名带进界面
+    expect(describeError(RepairException('没有可读取的媒体样本')), '没有可读取的媒体样本');
   });
 }

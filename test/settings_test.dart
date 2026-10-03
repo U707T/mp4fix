@@ -99,6 +99,30 @@ void main() {
     expect(WebDavConfig(host: 'h', path: '//dav//x//').url, 'http://h:5244/dav/x');
     // 主机首尾空白会被清理
     expect(WebDavConfig(host: ' h ', path: '').url, 'http://h:5244');
+
+    // 主机栏直接粘贴整串地址 → 自动拆开（端口 / 路径 / https 都跟着走）
+    expect(
+      WebDavConfig(host: 'http://10.0.0.9:5244/dav/本地存储', port: '1', path: 'ignored')
+          .url,
+      'http://10.0.0.9:5244/dav/本地存储',
+    );
+    expect(
+      WebDavConfig(host: 'https://v.example.com/x').url,
+      'https://v.example.com:443/x',
+    );
+    expect(WebDavConfig(host: 'http://h/x').url, 'http://h:80/x');
+    // 粘贴串里没有路径 → 沿用表单「路径」
+    expect(WebDavConfig(host: 'http://h', path: 'dav').url, 'http://h:80/dav');
+
+    // splitServerUrl：只有「整串地址」才拆，普通主机名返回 null
+    expect(splitServerUrl(' h '), isNull);
+    final split = splitServerUrl('http://host:8080/dav/x');
+    expect(split?.host, 'host');
+    expect(split?.port, '8080');
+    expect(split?.path, '/dav/x');
+    expect(split?.scheme, 'http');
+    expect(splitServerUrl('https://host/x')?.scheme, 'https');
+    expect(splitServerUrl('https://host/x')?.port, '443');
   });
 
   test('记住密码：默认关闭，开启后随设置往返', () {

@@ -96,20 +96,32 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 是否有可修复的任务。
+  /// 这个任务在当前设置下是否算「待修复」：
+  /// 需重排总是算；可优化只在设置里勾了「同时处理可优化」时算
+  /// （单条手动「修复这条」不受此限制）。
+  bool isFixableNow(FixJob job) => shouldBatchFix(
+        job.status,
+        includeOptimizable: settings.includeOptimizable,
+      );
+
+  /// 是否有可修复的任务（受「同时处理可优化」设置影响）。
   bool hasFixable(JobSource source) =>
-      jobs.any((j) => j.source == source && j.status.fixable);
+      jobs.any((j) => j.source == source && isFixableNow(j));
 
   /// 可修复（问题项）数量。
   int fixableCount(JobSource source) =>
-      jobs.where((j) => j.source == source && j.status.fixable).length;
+      jobs.where((j) => j.source == source && isFixableNow(j)).length;
 
   /// "全部处理"会覆盖的数量：问题项 + 正常项（正常项也会被重新重排）。
   int processAllCount(JobSource source) => jobs
       .where(
         (j) =>
             j.source == source &&
-            (j.status.fixable || j.status == JobStatus.ok),
+            shouldBatchFix(
+              j.status,
+              includeOptimizable: settings.includeOptimizable,
+              processAll: true,
+            ),
       )
       .length;
 
@@ -748,34 +760,45 @@ class AppController extends ChangeNotifier {
     final created = <FixJob>[];
     for (final f in files) {
       var path = f.path;
-      // Android：content:// 输入（非本地路径）先复制到应用缓存
-      if (path == null && f.uri.scheme == 'content' && AndroidPlatform.isSupported) {
-        path = await AndroidPlatform.copyToCache(
-          uri: f.uri.toString(),
-          name: f.name,
-        );
+      String? sourceUri;
+      // Android：content:// 输入（非本地路径）不立刻整份复制 —— 先留着 URI，
+      // 检测走「只读预取」（同 WebDAV：只取盒头 / moov / moof）；确认要修复时
+      // 再复制到缓存。来源不支持随机读时自动退回"先复制再检测"。
+      if (path == null &&
+          f.uri.scheme == 'content' &&
+          AndroidPlatform.isSupported) {
+        sourceUri = f.uri.toString();
       }
-      if (path == null) continue;
-      path = normalizePickedPath(path);
+      if (path == null && sourceUri == null) continue;
+      if (path != null) path = normalizePickedPath(path);
       created.add(_newJob(
         source: JobSource.local,
         name: f.name,
         // 桌面显示完整路径（同名文件在不同文件夹时一眼可分），Android 只显示文件名
-        displayPath: AndroidPlatform.isSupported ? f.name : path,
+        displayPath:
+            AndroidPlatform.isSupported ? f.name : (path ?? f.name),
         size: f.lengthSync() ?? -1,
         localPath: path,
-        modifiedMs: _modifiedMs(File(path)),
+        sourceUri: sourceUri,
+        modifiedMs: path == null ? 0 : _modifiedMs(File(path)),
       ));
     }
     if (created.isEmpty) return;
     await _inspectLocalJobs(created);
     if (fixAfterPick && !_cancelRequested) {
-      final fixable = created.where((j) => j.status.fixable).toList();
+      final fixable = created
+          .where(
+            (j) => shouldBatchFix(
+              j.status,
+              includeOptimizable: settings.includeOptimizable,
+            ),
+          )
+          .toList();
       if (fixable.isEmpty) {
         lastNotice = '检测完成：没有需要重排的视频';
         notifyListeners();
       } else {
-        await fixJobs(JobSource.local, fixable);
+        await fixJobs(JobSource.local, only: fixable);
       }
     }
   }
@@ -800,6 +823,22 @@ class AppController extends ChangeNotifier {
   Future<void> _inspectLocalJob(FixJob job) async {
     final path = job.localPath;
     if (path == null) {
+      // Android content:// 来源：优先只读预取；不可用时退回复制到缓存
+      if (job.sourceUri != null && AndroidPlatform.isSupported) {
+        job.status = JobStatus.inspecting;
+        job.message = '读取文件头与 moov…';
+        job.progress = 0;
+        notifyListeners();
+        try {
+          await _inspectSafJob(job);
+        } catch (e) {
+          job.status = JobStatus.error;
+          job.message = _message(e);
+        }
+        await _tryReuse(job);
+        notifyListeners();
+        return;
+      }
       job.status = JobStatus.error;
       job.message = '缺少本地文件';
       notifyListeners();
@@ -824,6 +863,34 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 检测一个只有 SAF `content://` URI 的任务。
+  ///
+  /// 优先「只读预取」（平台侧用文件描述符随机读 盒头/moov/moof，不整份复制，
+  /// 与 WebDAV 扫描同一思路）；来源不支持随机读（管道类 provider）时，
+  /// 自动退回"复制到缓存再检测"。
+  Future<void> _inspectSafJob(FixJob job) async {
+    final uri = job.sourceUri!;
+    try {
+      final pre = await AndroidPlatform.prefetchForInspect(uri);
+      final report = await inspectPrefetchedInIsolate(
+        pre.size,
+        pre.ranges,
+        thresholdBytes: settings.thresholdBytes,
+      );
+      _applyReport(job, report);
+    } on SafNotSeekableException {
+      job.message = '复制到缓存…';
+      notifyListeners();
+      final local = await AndroidPlatform.copyToCache(uri: uri, name: job.name);
+      job.localPath = local;
+      final report = await inspectFileInIsolate(
+        local,
+        thresholdBytes: settings.thresholdBytes,
+      );
+      _applyReport(job, report);
+    }
+  }
+
   /// 重新处理一条任务（清掉它的修复记录，重新检测 + 修复）。
   Future<void> redoJob(FixJob job) async {
     if (running || job.busy) return;
@@ -836,7 +903,7 @@ class AppController extends ChangeNotifier {
 
     if (job.source == JobSource.webdav) {
       await _reInspectWebDav(job);
-      if (job.status.fixable) await fixWebDavJobs(only: [job]);
+      if (job.status.fixable) await fixWebDavJobs(only: [job], force: true);
       return;
     }
     // Android SAF：复用跳过了"复制到缓存"，重做时补上
@@ -861,7 +928,9 @@ class AppController extends ChangeNotifier {
       _setRunning(null);
     }
     await _inspectLocalJob(job);
-    if (job.status.fixable) await fixJobs(job.source, [job]);
+    if (job.status.fixable) {
+      await fixJobs(job.source, only: [job], force: true);
+    }
   }
 
   /// 重新检测一条 WebDAV 任务（「重做」用）。
@@ -930,7 +999,25 @@ class AppController extends ChangeNotifier {
       if (_runningSource == JobSource.folder) _setRunning(null);
     }
     if (fixAfterScan && !_cancelRequested) {
-      await fixJobs(JobSource.folder, targets);
+      final fixable = targets
+          .where(
+            (j) => shouldBatchFix(
+              j.status,
+              includeOptimizable: settings.includeOptimizable,
+            ),
+          )
+          .length;
+      if (fixable == 0) {
+        final optimizable =
+            targets.where((j) => j.status == JobStatus.optimizable).length;
+        lastNotice = optimizable > 0
+            ? '扫描完成：没有需重排的视频（有 $optimizable 个「可优化」，'
+                '可在设置里勾选「同时处理可优化」一并处理）'
+            : '扫描完成：没有需要处理的视频';
+        notifyListeners();
+      } else {
+        await fixJobs(JobSource.folder, only: targets);
+      }
     }
   }
 
@@ -956,25 +1043,17 @@ class AppController extends ChangeNotifier {
           modifiedMs: e.modifiedMs,
         );
         targets.add(job);
-        // 已修复过（产物还在）→ 跳过复制 + 检测
+        // 已修复过（产物还在）→ 跳过检测 + 复制
         if (await _tryReuse(job)) {
           _tickBatch(i + 1);
           continue;
         }
         job.status = JobStatus.inspecting;
-        job.message = '复制到缓存…';
+        job.message = '读取文件头与 moov…';
         notifyListeners();
         try {
-          final local = await AndroidPlatform.copyToCache(
-            uri: e.uri,
-            name: e.name,
-          );
-          job.localPath = local;
-          final report = await inspectFileInIsolate(
-            local,
-            thresholdBytes: settings.thresholdBytes,
-          );
-          _applyReport(job, report);
+          // 只读预取（不整份复制）；不可用时 _inspectSafJob 内部退回复制
+          await _inspectSafJob(job);
         } catch (err) {
           job.status = JobStatus.error;
           job.message = _message(err);
@@ -1201,6 +1280,7 @@ class AppController extends ChangeNotifier {
     bool? uploadCopies,
     List<FixJob>? only,
     bool processAll = false,
+    bool force = false,
   }) async {
     if (running) return;
     uploadCopies ??= webDavUploadCopies;
@@ -1211,13 +1291,17 @@ class AppController extends ChangeNotifier {
     final fixer = WebDavFixer(client, cacheDir: cache, repair: _isolateRepair);
     try {
       await _ensureLocalNetworkPermission();
-      final targets = only ??
-          jobs
+      final base = only ??
+          jobs.where((j) => j.source == JobSource.webdav).toList();
+      final targets = force
+          ? base
+          : base
               .where(
-                (j) =>
-                    j.source == JobSource.webdav &&
-                    (j.status.fixable ||
-                        (processAll && j.status == JobStatus.ok)),
+                (j) => shouldBatchFix(
+                  j.status,
+                  includeOptimizable: settings.includeOptimizable,
+                  processAll: processAll,
+                ),
               )
               .toList();
       _setBatch(targets.length);
@@ -1336,22 +1420,27 @@ class AppController extends ChangeNotifier {
 
   /// 修复某来源下的任务。
   ///
-  /// - 默认只处理"可修复"（需重排 / 可优化）的那些；
+  /// - 默认只处理"该处理"的（需重排；勾了「同时处理可优化」时再加可优化）；
   /// - [processAll] 为真时连判定为"正常"的也一起重排（"全部处理"）；
+  /// - [only] 给定时也走同一套筛选（除非 [force]，用于单条手动操作 / 重做）；
   /// - 已标记「已修复（复用）」的任务会跳过（单条「重做」才会重新处理）。
   Future<void> fixJobs(
-    JobSource source, [
+    JobSource source, {
     List<FixJob>? only,
     bool processAll = false,
-  ]) async {
+    bool force = false,
+  }) async {
     if (running) return;
-    final targets = only ??
-        jobs
+    final base = only ?? jobs.where((j) => j.source == source).toList();
+    final targets = force
+        ? base
+        : base
             .where(
-              (j) =>
-                  j.source == source &&
-                  (j.status.fixable ||
-                      (processAll && j.status == JobStatus.ok)),
+              (j) => shouldBatchFix(
+                j.status,
+                includeOptimizable: settings.includeOptimizable,
+                processAll: processAll,
+              ),
             )
             .toList();
     if (targets.isEmpty) return;
@@ -1366,7 +1455,29 @@ class AppController extends ChangeNotifier {
       for (var index = 0; index < targets.length; index++) {
         final job = targets[index];
         if (_cancelRequested) break;
-        final inputPath = job.localPath;
+        var inputPath = job.localPath;
+        // 检测阶段做过"只读预取"（跳过了整份复制）→ 真正要修复了才复制到缓存
+        if (inputPath == null &&
+            job.sourceUri != null &&
+            AndroidPlatform.isSupported) {
+          job.status = JobStatus.fixing;
+          job.progress = 0;
+          job.message = '复制到缓存…';
+          notifyListeners();
+          try {
+            inputPath = await AndroidPlatform.copyToCache(
+              uri: job.sourceUri!,
+              name: job.name,
+            );
+            job.localPath = inputPath;
+          } catch (e) {
+            job.status = JobStatus.failed;
+            job.message = '复制失败：${_message(e)}';
+            _tickBatch(index + 1);
+            notifyListeners();
+            continue;
+          }
+        }
         if (inputPath == null) {
           job.status = JobStatus.failed;
           job.message = '缺少本地文件';
@@ -1431,8 +1542,8 @@ class AppController extends ChangeNotifier {
       _setRunning(null);
       batchDone = 0;
       batchTotal = 0;
-      // 文件夹任务：修完的导入副本可以删了（重做会重新复制）
-      if (source == JobSource.folder) await _cleanupImportedCopies(targets);
+      // 修完的导入副本（整份视频）可以删了（重做会按 sourceUri 重新复制）
+      await _cleanupImportedCopies(targets);
       notifyListeners();
       await flushLedger();
     }

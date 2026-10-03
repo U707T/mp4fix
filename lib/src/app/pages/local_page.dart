@@ -126,6 +126,7 @@ class _LocalPageState extends State<LocalPage> {
             jobs: all,
             active: busy ? controller.batchDone : null,
             total: busy ? controller.batchTotal : null,
+            fixableCount: controller.fixableCount(JobSource.local),
             onFixAll: canRun && controller.hasFixable(JobSource.local)
                 ? () => guardUi(
                     context, () => controller.fixJobs(JobSource.local))

@@ -97,6 +97,21 @@ extension JobFilterX on JobFilter {
   };
 }
 
+/// 批量修复时某个状态是否应处理：
+///  - 需重排：总是处理；
+///  - 可优化（含分片 MP4）：仅当设置里勾选了「同时处理可优化」；
+///  - 正常：仅当「全部处理」（processAll）。
+bool shouldBatchFix(
+  JobStatus status, {
+  required bool includeOptimizable,
+  bool processAll = false,
+}) {
+  if (status == JobStatus.needsFix) return true;
+  if (status == JobStatus.optimizable) return includeOptimizable;
+  if (processAll && status == JobStatus.ok) return true;
+  return false;
+}
+
 /// 规范化"用户选中的路径"：去掉 `file://` 前缀、包裹引号与首尾空白。
 String normalizePickedPath(String raw) {
   var p = raw.trim();
@@ -145,7 +160,8 @@ String describeError(Object e) {
   }
   return raw.replaceFirst(
     RegExp(r'^(Bad state|Exception|StateError|FormatException|'
-        r'FileSystemException|PathNotFoundException|MissingPluginException):\s*'),
+        r'FileSystemException|PathNotFoundException|MissingPluginException|'
+        r'RepairException|WebDavException):\s*'),
     '',
   );
 }
@@ -196,6 +212,29 @@ class FixJob {
   bool get busy => status.busy;
 }
 
+/// 尝试把「整串地址」（`http://host:port/path`）拆成表单字段。
+///
+/// 主机栏允许直接粘贴整串地址（与旧版一致）：能拆出 host/port/path 时返回
+/// 拆分结果，否则返回 null（调用方按普通主机名处理）。[extraPath] 为表单
+/// 「路径」字段：粘贴串里没带路径时沿用它。
+({String scheme, String host, String port, String path})? splitServerUrl(
+  String raw, {
+  String extraPath = '',
+}) {
+  final trimmed = raw.trim();
+  if (!trimmed.contains('://')) return null;
+  final parsed = Uri.tryParse(trimmed);
+  if (parsed == null || parsed.host.isEmpty) return null;
+  final scheme = parsed.scheme.toLowerCase() == 'https' ? 'https' : 'http';
+  final port =
+      parsed.hasPort ? '${parsed.port}' : (scheme == 'https' ? '443' : '80');
+  // Uri.path 是百分号编码的形态（中文会变 %XX）；拆出来要还原成明文，
+  // 由客户端层统一再编码。
+  var path = Uri.decodeComponent(parsed.path);
+  if (path.isEmpty) path = extraPath.trim();
+  return (scheme: scheme, host: parsed.host, port: port, path: path);
+}
+
 /// WebDAV 连接配置（密码不落盘）。
 ///
 /// 默认值来自 [AppDefaults]（出厂即指向默认 alist 服务器，表单可直接用）。
@@ -217,12 +256,18 @@ class WebDavConfig {
   bool insecure;
 
   /// 拼出完整 URL（不含尾部斜杠）。
+  ///
+  /// 主机栏被粘贴成整串（`http://host:port/path`）时自动拆开，不该拆不动。
   String get url {
-    final scheme = https ? 'https' : 'http';
-    final p = port.trim().isEmpty ? (https ? '443' : '80') : port.trim();
+    final split = splitServerUrl(host, extraPath: path);
+    final scheme = split?.scheme ?? (https ? 'https' : 'http');
+    final hostPart = (split?.host ?? host.trim());
+    final rawPort = split?.port ?? port.trim();
+    final portPart = rawPort.isEmpty ? (scheme == 'https' ? '443' : '80') : rawPort;
+    final rawPath = split?.path ?? path;
     // 折叠重复斜杠并去掉首尾斜杠（用户手输 'dav//x/' 也能拼出正确 URL）
-    final cleanPath = path.trim().replaceAll(RegExp(r'/+'), '/').replaceAll(RegExp(r'^/|/$'), '');
-    return '$scheme://${host.trim()}:$p'
+    final cleanPath = rawPath.trim().replaceAll(RegExp(r'/+'), '/').replaceAll(RegExp(r'^/|/$'), '');
+    return '$scheme://$hostPart:$portPart'
         '${cleanPath.isEmpty ? '' : '/$cleanPath'}';
   }
 

@@ -7,6 +7,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import io.flutter.embedding.android.FlutterActivity
@@ -14,7 +15,10 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.io.FileInputStream
 import java.io.IOException
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 
 /**
  * 平台通道：补足插件做不到的两件事 ——
@@ -56,6 +60,15 @@ class MainActivity : FlutterActivity() {
                     return
                 }
                 runInBackground(result) { copyToCache(uri, name) }
+            }
+
+            "prefetchForInspect" -> {
+                val uri = call.argument<String>("uri")?.let(Uri::parse)
+                if (uri == null) {
+                    result.error("bad_args", "缺少 uri", null)
+                    return
+                }
+                runInBackground(result) { prefetchForInspect(uri) }
             }
 
             "saveToDownloads" -> {
@@ -134,12 +147,17 @@ class MainActivity : FlutterActivity() {
     /// 在后台线程执行大文件 IO，结果回主线程（避免 ANR）。
     private fun runInBackground(
         result: MethodChannel.Result,
-        block: () -> String,
+        block: () -> Any?,
     ) {
         Thread {
             try {
                 val value = block()
                 mainHandler.post { result.success(value) }
+            } catch (e: NotSeekableException) {
+                // 管道类来源：Dart 侧会退回复制到缓存再处理
+                mainHandler.post {
+                    result.error("not_seekable", e.message ?: "not seekable", null)
+                }
             } catch (e: Exception) {
                 val message = e.message ?: e.javaClass.simpleName
                 mainHandler.post { result.error("platform_error", message, null) }
@@ -154,11 +172,16 @@ class MainActivity : FlutterActivity() {
         val parent = parentDocumentUri(tree)
         val partName = "$name.mp4fix-part"
 
-        // 1) 先写 .part
+        // 1) 先写 .part（失败时清理半成品，别留垃圾）
         val partUri = findChild(tree, parent, partName) ?: createDocument(tree, parent, partName)
-        resolver.openOutputStream(partUri, "wt")?.use { out ->
-            source.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
-        } ?: throw IOException("无法打开输出流（所选文件夹不可写）")
+        try {
+            resolver.openOutputStream(partUri, "wt")?.use { out ->
+                source.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
+            } ?: throw IOException("无法打开输出流（所选文件夹不可写）")
+        } catch (e: Exception) {
+            runCatching { DocumentsContract.deleteDocument(resolver, partUri) }
+            throw e
+        }
 
         // 2) 校验落盘大小
         val written = source.length()
@@ -190,7 +213,15 @@ class MainActivity : FlutterActivity() {
             DocumentsContract.renameDocument(resolver, partUri, name)
         }.getOrNull() != null
         if (!renamed) {
-            val target = createDocument(tree, parent, name)
+            // 创建正式文件失败：先把让位的旧文件还原回去，再报错
+            val target = try {
+                createDocument(tree, parent, name)
+            } catch (e: Exception) {
+                backupUri?.let {
+                    runCatching { DocumentsContract.renameDocument(resolver, it, name) }
+                }
+                throw e
+            }
             try {
                 resolver.openInputStream(partUri)?.use { input ->
                     resolver.openOutputStream(target, "wt")?.use { out ->
@@ -360,6 +391,136 @@ class MainActivity : FlutterActivity() {
         return if (File(dir, name).exists()) Uri.fromFile(File(dir, name)) else null
     }
 
+    // ---------------------------------------------------------------- 只读预取（检测）
+
+    /** 管道类来源（不能 seek / 取不到大小）→ 调用方退回复制到缓存。 */
+    private class NotSeekableException(message: String) : IOException(message)
+
+    /**
+     * 只读预取"检测所需区域"：每个顶层盒的头部 + 整个 moov + 每个 moof。
+     *
+     * 与服务端 WebDAV 扫描同一思路：几 GB 的视频只需要读盒头与 moov（分片文件
+     * 再加各 moof，通常每个仅几 KB），避免把整份视频复制到缓存。
+     * 用 ParcelFileDescriptor 的文件描述符做随机读；来源不支持随机读时抛
+     * [NotSeekableException]，Dart 侧自动退回"复制到缓存再检测"。
+     */
+    private fun prefetchForInspect(uri: Uri): Map<String, Any?> {
+        val pfd = contentResolver.openFileDescriptor(uri, "r")
+            ?: throw IOException("无法打开文件：$uri")
+        pfd.use { desc ->
+            // 显式确认可 seek（管道类 provider 不能随机读 → 退回复制）
+            if (!isSeekable(desc)) throw NotSeekableException("来源不支持随机读取")
+            val statSize = desc.statSize
+            val size = if (statSize >= 0) {
+                statSize
+            } else {
+                runCatching {
+                    FileInputStream(desc.fileDescriptor).channel.size()
+                }.getOrElse { -1L }
+            }
+            if (size < 0) throw NotSeekableException("无法获取文件大小")
+
+            val channel = FileInputStream(desc.fileDescriptor).channel
+            val ranges = ArrayList<Map<String, Any?>>()
+            var pos = 0L
+            var boxCount = 0
+            var moofCount = 0
+            try {
+                while (pos + 8 <= size) {
+                    if (++boxCount > MAX_BOX_COUNT) break
+                    val hdr = readAt(channel, pos, 16)
+                    if (hdr.size < 8) break
+                    var boxSize = (beU32(hdr, 0).toLong() and 0xFFFFFFFFL)
+                    var header = 8
+                    if (boxSize == 1L) {
+                        if (hdr.size < 16) break
+                        boxSize = beU64(hdr, 8)
+                        header = 16
+                    } else if (boxSize == 0L) {
+                        boxSize = size - pos
+                    }
+                    ranges.add(
+                        mapOf(
+                            "start" to pos,
+                            "bytes" to hdr.copyOf(minOf(header, hdr.size)),
+                        )
+                    )
+                    if (boxSize < header || pos + boxSize > size) break
+                    val type = String(hdr, 4, 4, Charsets.ISO_8859_1)
+                    if (type == "moov" || type == "moof") {
+                        val payload = boxSize - header
+                        if (type == "moov" && payload > MAX_MOOV) {
+                            throw IOException("moov 过大（$payload 字节），已跳过")
+                        }
+                        if (type == "moof") {
+                            if (++moofCount > MAX_FRAGMENTS) {
+                                throw IOException("分片数过多（>$MAX_FRAGMENTS），已跳过")
+                            }
+                            if (payload > MAX_MOOF) {
+                                throw IOException("moof 过大（$payload 字节），已跳过")
+                            }
+                        }
+                        if (payload > 0) {
+                            val body = readAt(channel, pos + header, payload.toInt())
+                            if (body.size.toLong() != payload) {
+                                throw IOException("预取读取不完整")
+                            }
+                            ranges.add(
+                                mapOf("start" to pos + header, "bytes" to body)
+                            )
+                        }
+                    }
+                    pos += boxSize
+                }
+            } catch (e: IOException) {
+                if (pos == 0L) throw NotSeekableException("来源不支持随机读取")
+                throw e
+            }
+            return mapOf("size" to size, "ranges" to ranges)
+        }
+    }
+
+    /** 文件描述符是否可 seek（管道 / 套接字类来源为 false）。 */
+    private fun isSeekable(desc: ParcelFileDescriptor): Boolean = try {
+        android.system.Os.lseek(desc.fileDescriptor, 0L, android.system.OsConstants.SEEK_CUR)
+        true
+    } catch (e: Exception) {
+        false
+    }
+
+    /** 从指定偏移读取最多 [len] 字节（PFD 不支持 seek 时抛 IOException）。 */
+    private fun readAt(channel: FileChannel, pos: Long, len: Int): ByteArray {
+        val buf = ByteBuffer.allocate(len)
+        var read = 0
+        try {
+            while (read < len) {
+                val n = channel.read(buf, pos + read)
+                if (n <= 0) break
+                read += n
+            }
+        } catch (e: Exception) {
+            throw IOException("随机读取失败：${e.message}", e)
+        }
+        buf.flip()
+        val out = ByteArray(read)
+        buf.get(out)
+        return out
+    }
+
+    private fun beU32(b: ByteArray, o: Int): Int =
+        ((b[o].toInt() and 0xFF) shl 24) or
+            ((b[o + 1].toInt() and 0xFF) shl 16) or
+            ((b[o + 2].toInt() and 0xFF) shl 8) or
+            (b[o + 3].toInt() and 0xFF)
+
+    private fun beU64(b: ByteArray, o: Int): Long {
+        var v = 0L
+        for (i in 0 until 8) {
+            v = (v shl 8) or (b[o + i].toLong() and 0xFF)
+        }
+        return v
+    }
+
     // ---------------------------------------------------------------- 输入复制
 
     private fun copyToCache(uri: Uri, name: String): String {
@@ -374,5 +535,9 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val CHANNEL = "mp4fix/platform"
+        private const val MAX_MOOV = 256L shl 20 // 预取 moov 上限 256MB
+        private const val MAX_MOOF = 64L shl 20 // 单个 moof 上限 64MB
+        private const val MAX_FRAGMENTS = 20000 // 预取 moof 个数上限
+        private const val MAX_BOX_COUNT = 50000 // 盒扫描保护上限
     }
 }

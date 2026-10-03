@@ -201,6 +201,7 @@ class _FolderPageState extends State<FolderPage> {
           jobs: all,
           active: busy ? controller.batchDone : null,
           total: busy ? controller.batchTotal : null,
+          fixableCount: controller.fixableCount(JobSource.folder),
           onFixAll: canRun && controller.hasFixable(JobSource.folder)
               ? () =>
                   guardUi(context, () => controller.fixJobs(JobSource.folder))

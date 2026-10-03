@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import '../engine/engine.dart';
+import '../webdav/prefetch.dart';
 
 /// 在后台 Isolate 中检测本地文件（不阻塞 UI）。
 Future<InspectReport> inspectFileInIsolate(
@@ -11,6 +13,28 @@ Future<InspectReport> inspectFileInIsolate(
 }) {
   return Isolate.run(() {
     final input = FileSeekableInput(File(path));
+    try {
+      return Mp4Inspect.inspect(
+        input,
+        interleaveThresholdBytes: thresholdBytes,
+      );
+    } finally {
+      input.close();
+    }
+  });
+}
+
+/// 在后台 Isolate 中检测「预取数据」的只读来源（Android SAF：不整份复制）。
+Future<InspectReport> inspectPrefetchedInIsolate(
+  int size,
+  List<({int start, Uint8List bytes})> ranges, {
+  required int thresholdBytes,
+}) {
+  return Isolate.run(() {
+    final input = PrefetchedSeekableInput(
+      size: size,
+      ranges: [for (final r in ranges) PrefetchRange(r.start, r.bytes)],
+    );
     try {
       return Mp4Inspect.inspect(
         input,

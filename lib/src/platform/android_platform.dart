@@ -2,11 +2,22 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 
+/// 来源不支持随机读取（如管道类 content provider）：
+/// 调用方应退回"复制到缓存再处理"。
+class SafNotSeekableException implements Exception {
+  const SafNotSeekableException();
+
+  @override
+  String toString() => '来源不支持随机读取（已退回复制到缓存）';
+}
+
 /// Android 平台通道（`mp4fix/platform`）。
 ///
 /// 只补足插件做不到的能力：
 ///  - 把文件写进用户选择的 SAF 文件夹（saf_util 只读）；
-///  - 把 `content://` 输入复制到应用缓存（供纯 Dart 引擎随机读取）。
+///  - 把 `content://` 输入复制到应用缓存（供纯 Dart 引擎随机读取）；
+///  - `content://` 输入的「只读预取」：只取盒头 / moov / moof 做体检，
+///    不整份复制（与服务端 WebDAV 扫描同一思路）。
 ///
 /// 非 Android 平台上的调用会抛出 [UnsupportedError]，调用方需先判断
 /// [AndroidPlatform.isSupported]。
@@ -15,6 +26,39 @@ class AndroidPlatform {
 
   /// 当前平台是否支持（仅 Android）。
   static bool get isSupported => Platform.isAndroid;
+
+  /// 只读预取"检测所需区域"：每个顶层盒的头部 + 整个 moov + 每个 moof。
+  ///
+  /// 返回（文件大小, 区间列表）；来源不支持随机读取时抛
+  /// [SafNotSeekableException]，调用方退回复制到缓存。
+  static Future<({int size, List<({int start, Uint8List bytes})> ranges})>
+      prefetchForInspect(String uri) async {
+    final Map<Object?, Object?>? raw;
+    try {
+      raw = await _channel.invokeMethod<Map<Object?, Object?>>(
+        'prefetchForInspect',
+        {'uri': uri},
+      );
+    } on PlatformException catch (e) {
+      if (e.code == 'not_seekable') throw const SafNotSeekableException();
+      rethrow;
+    }
+    if (raw == null) throw StateError('预取失败（平台未返回数据）');
+    final size = (raw['size'] as num?)?.toInt() ?? -1;
+    final ranges = <({int start, Uint8List bytes})>[];
+    final rawRanges = raw['ranges'];
+    if (rawRanges is List) {
+      for (final item in rawRanges) {
+        if (item is! Map) continue;
+        final start = (item['start'] as num?)?.toInt();
+        final bytes = item['bytes'];
+        if (start == null || bytes is! Uint8List) continue;
+        ranges.add((start: start, bytes: bytes));
+      }
+    }
+    if (size < 0) throw StateError('预取失败（未能获取文件大小）');
+    return (size: size, ranges: ranges);
+  }
 
   /// 把 [sourcePath] 写入 SAF 文件夹 [treeUri]，覆盖同名文件。
   /// 返回写入后的文档 URI。

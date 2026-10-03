@@ -99,8 +99,9 @@ class JobTile extends StatelessWidget {
                   onPressed: () => canRedo
                       ? controller.redoJob(job)
                       : (job.source == JobSource.webdav
-                          ? controller.fixWebDavJobs(only: [job])
-                          : controller.fixJobs(job.source, [job])),
+                          ? controller.fixWebDavJobs(only: [job], force: true)
+                          : controller.fixJobs(job.source,
+                              only: [job], force: true)),
                   icon: Icon(
                     canRedo ? Icons.refresh_rounded : Icons.build_rounded,
                     size: 18,

@@ -1,7 +1,7 @@
 name: mp4fix
 description: "MP4 无损修复器：修复音视频交错被打乱的 MP4（不重新编码），支持本地文件 / 文件夹批量 / WebDAV 扫描修复。"
 publish_to: 'none'
-version: 2.5.0+15
+version: 2.5.1+16
 
 environment:
   sdk: ^3.13.4

@@ -134,11 +134,15 @@ void main() {
     final size = fixture('fragmented.mp4').lengthSync();
 
     // 远程预取（盒头 + moov + 各 moof）检测
+    final reqBefore = server.requestCount;
     final input = await prefetchForInspect(client, url, fileSize: size);
+    final reqs = server.requestCount - reqBefore;
     late final InspectReport remote;
     try {
       remote = Mp4Inspect.inspect(input, interleaveThresholdBytes: 20000);
       expect(input.prefetchedBytes, lessThan(size), reason: '不应整档下载');
+      // 窗口化预取：8 个分片的文件应只需个位数请求（此前每个片段要 3 个）
+      expect(reqs, lessThan(30), reason: '分片预取请求数 $reqs');
     } finally {
       input.close();
     }
