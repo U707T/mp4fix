@@ -2,15 +2,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app_scope.dart';
+import '../models.dart';
 import '../ui.dart';
 import '../widgets/ui_kit.dart';
 
-/// 设置：判定规则 / 输出位置 / 外观 / 维护。
+/// 设置：判定规则 / 输出位置 / 文件命名 / 外观 / 维护。
 class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
   /// 与 pubspec.yaml 的 version 保持一致。
-  static const String appVersion = '2.3.2';
+  static const String appVersion = '2.4.0';
 
   @override
   Widget build(BuildContext context) {
@@ -102,6 +103,7 @@ class SettingsPage extends StatelessWidget {
               ),
             ],
           ),
+          const _NameRuleCard(),
           SectionCard(
             title: '外观',
             icon: Icons.palette_rounded,
@@ -129,6 +131,32 @@ class SettingsPage extends StatelessWidget {
             title: '维护',
             icon: Icons.cleaning_services_rounded,
             children: [
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('跳过已修复的文件'),
+                subtitle: const Text(
+                    '记住每个文件的修复结果：重新扫描时直接标「已修复」并跳过，不重复干活'),
+                value: settings.reuseRepairs,
+                onChanged: canEdit
+                    ? (v) => controller.updateSettings((s) => s.reuseRepairs = v)
+                    : null,
+              ),
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('清空修复记录'),
+                subtitle: Text('当前 ${controller.ledgerLength} 条；清空后所有文件都会重新检测 / 修复'),
+                trailing: const Icon(Icons.playlist_remove_rounded),
+                onTap: canEdit
+                    ? () {
+                        controller.clearLedger();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('修复记录已清空')),
+                        );
+                      }
+                    : null,
+              ),
               ListTile(
                 dense: true,
                 contentPadding: EdgeInsets.zero,
@@ -193,13 +221,113 @@ class SettingsPage extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(Insets.page, Insets.gap, Insets.page, 0),
             child: Text(
-              '提示：修复不会改变原文件；「上传副本」模式在服务器生成 原名_fixed.mp4，'
+              '提示：修复不会改变原文件；「上传副本」模式在服务器生成按命名规则（默认 原名_fixed.mp4）的副本，'
               '「保存到本地」模式服务器全程只读。',
               style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+/// 「文件命名」卡片：规则 + 前缀 / 后缀输入（自带输入控制器，避免每次重建丢光标）。
+class _NameRuleCard extends StatefulWidget {
+  const _NameRuleCard();
+
+  @override
+  State<_NameRuleCard> createState() => _NameRuleCardState();
+}
+
+class _NameRuleCardState extends State<_NameRuleCard> {
+  TextEditingController? _prefix;
+  TextEditingController? _suffix;
+
+  @override
+  void dispose() {
+    _prefix?.dispose();
+    _suffix?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = AppScope.of(context);
+    final settings = controller.settings;
+    final scheme = Theme.of(context).colorScheme;
+    final text = Theme.of(context).textTheme;
+    final canEdit = !controller.running;
+    final prefix = _prefix ??= TextEditingController(text: settings.namePrefix);
+    final suffix = _suffix ??= TextEditingController(text: settings.nameSuffix);
+    final needsPrefix = settings.nameMode == OutputNameMode.prefix ||
+        settings.nameMode == OutputNameMode.both;
+    final needsSuffix = settings.nameMode == OutputNameMode.suffix ||
+        settings.nameMode == OutputNameMode.both;
+    final example = settings.applyOutputName('示例视频.mp4');
+
+    return SectionCard(
+      title: '文件命名',
+      icon: Icons.drive_file_rename_outline_rounded,
+      children: [
+        Text(
+          '修好后的文件叫什么：可以保持原名（同名覆盖），也可以加前缀 / 后缀'
+          '（比如 `_fixed`、`修复_`），方便和原文件区分。',
+          style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
+        ),
+        const SizedBox(height: Insets.gapLarge),
+        SegmentedButton<OutputNameMode>(
+          showSelectedIcon: false,
+          segments: [
+            for (final mode in OutputNameMode.values)
+              ButtonSegment(value: mode, label: Text(mode.label)),
+          ],
+          selected: {settings.nameMode},
+          onSelectionChanged: canEdit
+              ? (v) => controller.updateSettings((s) => s.nameMode = v.first)
+              : null,
+        ),
+        const SizedBox(height: Insets.gap),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                enabled: canEdit && needsPrefix,
+                controller: prefix,
+                decoration: const InputDecoration(
+                  labelText: '前缀',
+                  hintText: '例如 修复_',
+                  isDense: true,
+                ),
+                onChanged: (v) =>
+                    controller.updateSettings((s) => s.namePrefix = v),
+              ),
+            ),
+            const SizedBox(width: Insets.gap),
+            Expanded(
+              child: TextField(
+                enabled: canEdit && needsSuffix,
+                controller: suffix,
+                decoration: const InputDecoration(
+                  labelText: '后缀',
+                  hintText: '例如 _fixed',
+                  isDense: true,
+                ),
+                onChanged: (v) =>
+                    controller.updateSettings((s) => s.nameSuffix = v),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: Insets.gap),
+        StatusStrip(
+          icon: Icons.visibility_outlined,
+          text: '示例：示例视频.mp4 → $example',
+          tone: example == '示例视频.mp4'
+              ? StatusTone.neutral
+              : StatusTone.good,
+        ),
+      ],
     );
   }
 }

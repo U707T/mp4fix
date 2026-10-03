@@ -206,7 +206,7 @@ class ActionBar extends StatelessWidget {
   );
 }
 
-/// 任务汇总（按状态计数）+ 总进度。
+/// 任务汇总（按状态计数）+ 总进度 + 一键修复按钮。
 class JobSummaryBar extends StatelessWidget {
   const JobSummaryBar({
     super.key,
@@ -214,6 +214,7 @@ class JobSummaryBar extends StatelessWidget {
     this.active,
     this.total,
     this.onFixAll,
+    this.onProcessAll,
   });
 
   final List<FixJob> jobs;
@@ -225,6 +226,9 @@ class JobSummaryBar extends StatelessWidget {
   /// 一键修复"已有检测结果里可修复的那些"（**不重新扫描**）。
   final VoidCallback? onFixAll;
 
+  /// 一键处理"包括正常在内的全部视频"（重排所有还没处理过的文件）。
+  final VoidCallback? onProcessAll;
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -235,6 +239,8 @@ class JobSummaryBar extends StatelessWidget {
     final running = jobs.where((j) => j.status.busy).length;
     final pending = jobs.where((j) => j.status == JobStatus.pending).length;
     final fixableCount = jobs.where((j) => j.status.fixable).length;
+    final doneCount = jobs.where((j) => j.status.finished).length;
+    final problemCount = jobs.where((j) => j.status.problematic).length;
 
     final parts = <String>[
       '共 ${jobs.length}',
@@ -243,14 +249,8 @@ class JobSummaryBar extends StatelessWidget {
       if (count(JobStatus.ok) > 0) '正常 ${count(JobStatus.ok)}',
       if (count(JobStatus.needsFix) > 0) '需重排 ${count(JobStatus.needsFix)}',
       if (count(JobStatus.optimizable) > 0) '可优化 ${count(JobStatus.optimizable)}',
-      if (count(JobStatus.saved) + count(JobStatus.uploaded) > 0)
-        '已完成 ${count(JobStatus.saved) + count(JobStatus.uploaded)}',
-      if (count(JobStatus.corrupt) +
-              count(JobStatus.unsupported) +
-              count(JobStatus.error) +
-              count(JobStatus.failed) >
-          0)
-        '问题 ${count(JobStatus.corrupt) + count(JobStatus.unsupported) + count(JobStatus.error) + count(JobStatus.failed)}',
+      if (doneCount > 0) '已完成 $doneCount',
+      if (problemCount > 0) '问题 $problemCount',
     ];
 
     final showProgress = active != null && total != null && total! > 0;
@@ -288,6 +288,17 @@ class JobSummaryBar extends StatelessWidget {
                   style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
                 ),
               ),
+              if (onProcessAll != null) ...[
+                const SizedBox(width: Insets.gap),
+                TextButton.icon(
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: onProcessAll,
+                  icon: const Icon(Icons.layers_rounded, size: 18),
+                  label: const Text('全部处理'),
+                ),
+              ],
               if (onFixAll != null && fixableCount > 0) ...[
                 const SizedBox(width: Insets.gap),
                 FilledButton.tonalIcon(
@@ -306,6 +317,59 @@ class JobSummaryBar extends StatelessWidget {
     );
   }
 }
+
+/// 任务筛选（"额外的按钮列表"）：按状态查看列表里到底有哪些视频待处理 / 待优化。
+///
+/// 每个筛选项带上数量；点一下只显示该组任务，再点「全部」回到完整列表。
+class JobFilterBar extends StatelessWidget {
+  const JobFilterBar({
+    super.key,
+    required this.jobs,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final List<FixJob> jobs;
+  final JobFilter value;
+  final ValueChanged<JobFilter> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    if (jobs.isEmpty) return const SizedBox.shrink();
+    final scheme = Theme.of(context).colorScheme;
+    final counts = <JobFilter, int>{
+      for (final filter in JobFilter.values)
+        filter: jobs.where((j) => filter.matches(j.status)).length,
+    };
+    return SizedBox(
+      height: 44,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: Insets.page),
+        children: [
+          for (final filter in JobFilter.values)
+            Padding(
+              padding: const EdgeInsets.only(right: Insets.gap / 2),
+              child: FilterChip(
+                label: Text(
+                  '${filter.label} ${counts[filter]}',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                visualDensity: VisualDensity.compact,
+                selected: value == filter,
+                showCheckmark: false,
+                side: BorderSide(
+                  color: value == filter ? Colors.transparent : scheme.outlineVariant,
+                ),
+                onSelected: (_) => onChanged(filter),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 
 /// 空状态（统一图标 / 文案 / 间距）。
 class EmptyHint extends StatelessWidget {

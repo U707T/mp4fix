@@ -31,7 +31,7 @@ jobs:
         run: flutter pub get
       - name: Analyze
         run: dart analyze
-      - name: Test (engine + WebDAV end-to-end, 25 项)
+      - name: Test (engine + WebDAV end-to-end + 记录 / 命名规则, 79 项)
         run: flutter test
 
   # ---------------------------------------------------------------- Android

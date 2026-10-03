@@ -15,12 +15,17 @@ void main() {
     File('${dir.path}/a.mp4').writeAsStringSync('old');
     final src = File('${dir.path}/tmp-src')..writeAsStringSync('new-content');
 
-    final name = await DirectoryOutputTarget(dir).save(src, 'a.mp4');
+    final target = DirectoryOutputTarget(dir);
+    final saved = await target.save(src, 'a.mp4');
 
-    expect(name, 'a.mp4');
+    expect(saved, '${dir.path}${Platform.pathSeparator}a.mp4',
+        reason: '返回完整路径，界面里「已保存：…」与「打开所在文件夹」都要用');
     expect(File('${dir.path}/a.mp4').readAsStringSync(), 'new-content');
     expect(File('${dir.path}/a.mp4.mp4fix-bak').existsSync(), isFalse);
     expect(src.existsSync(), isFalse, reason: '临时文件应被移走而不是留下副本');
+    expect(target.ledgerKind, 'dir');
+    expect(target.ledgerRef, dir.path);
+    expect(target.localDirectory, dir.path, reason: '桌面可定位产物目录');
   });
 
   test('落位失败：旧文件被还原（不丢数据）', () async {

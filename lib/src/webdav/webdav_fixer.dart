@@ -199,10 +199,13 @@ class WebDavFixer {
 
   /// 上传副本模式：下载 → 修复 → 上传「原名_fixed.mp4」（重名自动加序号），
   /// 上传后校验服务器上的文件大小。原文件不动。
+  ///
+  /// [copyName] 可指定副本文件名（设置里的命名规则）；为空时用 `原名_fixed.ext`。
   Future<FixResult> fix(
     ScanItem item, {
     FixPhaseCallback? onPhase,
     bool Function()? isCancelled,
+    String? copyName,
   }) async {
     cacheDir.createSync(recursive: true);
     final downloadFile = _tempFile('dl');
@@ -233,16 +236,17 @@ class WebDavFixer {
       );
       if (cancelled()) return _cancelledResult();
 
-      // 3）上传副本（唯一命名：原名_fixed.mp4 / 原名_fixed_2.mp4 …）
+      // 3）上传副本（唯一命名：默认 原名_fixed.mp4；重名自动加序号）
       onPhase?.call('上传中', 0.75);
       final fileName = client.fileNameOf(item.url);
       final dot = fileName.lastIndexOf('.');
       final base = dot > 0 ? fileName.substring(0, dot) : fileName;
       final ext = dot > 0 ? fileName.substring(dot + 1) : 'mp4';
-      var target = client.sibling(item.url, '${base}_fixed.$ext');
+      final wanted = copyName ?? '${base}_fixed.$ext';
+      var target = client.sibling(item.url, wanted);
       var n = 2;
       while (await client.exists(target) && n <= 50) {
-        target = client.sibling(item.url, '${base}_fixed_$n.$ext');
+        target = client.sibling(item.url, _withSequence(wanted, n));
         n++;
       }
       if (await client.exists(target)) {
@@ -307,6 +311,13 @@ class WebDavFixer {
     cancelled: true,
     message: '已取消',
   );
+
+  /// 重名时的退让命名：`a_fixed.mp4` + 2 → `a_fixed_2.mp4`。
+  static String _withSequence(String fileName, int n) {
+    final dot = fileName.lastIndexOf('.');
+    if (dot <= 0) return '${fileName}_$n';
+    return '${fileName.substring(0, dot)}_$n${fileName.substring(dot)}';
+  }
 
   Future<void> _quietDelete(String url) async {
     try {

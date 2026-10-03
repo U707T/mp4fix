@@ -6,7 +6,7 @@ import 'package:flutter/material.dart';
 import 'src/app/app.dart';
 import 'src/app/app_controller.dart';
 
-Future<void> main() async {
+Future<void> main(List<String> args) async {
   // 未处理异常：记录日志并尽量让界面继续可用（而不是直接崩掉）
   runZonedGuarded(
     () async {
@@ -24,6 +24,11 @@ Future<void> main() async {
       final controller = AppController();
       await controller.init();
       runApp(Mp4FixApp(controller: controller));
+
+      // 「用 MP4Fix 打开」/ 把文件拖到 exe 图标上：命令行参数直接导入检测
+      if (args.isNotEmpty) {
+        unawaited(controller.importPaths(args, reason: '命令行导入'));
+      }
     },
     (error, stack) => debugPrint('[mp4fix] Zone error: $error\n$stack'),
   );

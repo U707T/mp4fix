@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../app_scope.dart';
 import '../models.dart';
+import '../ui.dart';
 import '../widgets/job_tile.dart';
 import '../widgets/ui_kit.dart';
 
@@ -21,6 +22,7 @@ class _WebDavPageState extends State<WebDavPage> {
   late TextEditingController _pass;
   bool _seeded = false;
   bool _uploadCopies = true;
+  JobFilter _filter = JobFilter.all;
   String _status = '';
   StatusTone _statusTone = StatusTone.neutral;
 
@@ -63,10 +65,13 @@ class _WebDavPageState extends State<WebDavPage> {
   @override
   Widget build(BuildContext context) {
     final controller = AppScope.of(context);
-    final jobs = controller.jobsOf(JobSource.webdav);
+    final all = controller.jobsOf(JobSource.webdav);
+    final jobs =
+        all.where((j) => _filter.matches(j.status)).toList(growable: false);
     final busy = controller.runningSource == JobSource.webdav;
     final canRun = !controller.running;
     final cfg = controller.settings.webdav;
+    final copyExample = controller.settings.applyOutputName('示例.mp4');
 
     return Scaffold(
       appBar: AppBar(title: const Text('WebDAV')),
@@ -228,7 +233,9 @@ class _WebDavPageState extends State<WebDavPage> {
               ),
               Text(
                 _uploadCopies
-                    ? '在服务器生成「原名_fixed.mp4」副本（原文件不动）'
+                    ? (copyExample == '示例.mp4'
+                        ? '在服务器生成「原名_fixed.mp4」副本（原文件不动）'
+                        : '在服务器生成「$copyExample」这样按命名规则的副本（原文件不动）')
                     : '服务器只读（GET/PROPFIND）· 产物存到 ${controller.outputDescription.replaceFirst('输出：', '')}',
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
@@ -282,11 +289,11 @@ class _WebDavPageState extends State<WebDavPage> {
                     icon: const Icon(Icons.travel_explore_rounded),
                     label: const Text('仅扫描'),
                   ),
-                  if (!busy && jobs.isNotEmpty)
+                  if (!busy && all.isNotEmpty)
                     TextButton(
                       onPressed: () {
                         final messenger = ScaffoldMessenger.of(context);
-                        final removed = jobs.length;
+                        final removed = all.length;
                         controller.clearJobs(JobSource.webdav);
                         messenger.showSnackBar(
                           SnackBar(
@@ -314,22 +321,33 @@ class _WebDavPageState extends State<WebDavPage> {
               ],
             ],
           ),
+          JobFilterBar(
+            jobs: all,
+            value: _filter,
+            onChanged: (f) => setState(() => _filter = f),
+          ),
           JobSummaryBar(
-            jobs: jobs,
+            jobs: all,
             active: busy ? controller.batchDone : null,
             total: busy ? controller.batchTotal : null,
             onFixAll: canRun && controller.hasFixable(JobSource.webdav)
                 ? () => _guard(() => controller.fixWebDavJobs())
                 : null,
+            onProcessAll:
+                canRun && controller.processAllCount(JobSource.webdav) > 0
+                    ? () => runProcessAll(context, controller, JobSource.webdav)
+                    : null,
           ),
           if (jobs.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 32),
+            Padding(
+              padding: const EdgeInsets.only(top: 32),
               child: EmptyHint(
                 icon: Icons.cloud_rounded,
-                title: '远程扫描不整档下载',
-                subtitle: '只读取文件头与 moov 就能判定交错质量；\n'
-                    '几 GB 的文件通常只需几百 KB 流量。',
+                title: all.isEmpty ? '远程扫描不整档下载' : '这个筛选下没有任务',
+                subtitle: all.isEmpty
+                    ? '只读取文件头与 moov 就能判定交错质量；\n'
+                        '几 GB 的文件通常只需几百 KB 流量。'
+                    : '点上方「全部」查看完整列表。',
               ),
             )
           else

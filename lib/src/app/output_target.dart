@@ -11,6 +11,15 @@ abstract class OutputTarget {
 
   /// 把 [source] 保存为 [name]（同名覆盖），返回展示位置。
   Future<String> save(File source, String name);
+
+  /// 修复记录里的位置类型（dir / saf / downloads）。
+  String get ledgerKind;
+
+  /// 修复记录里的位置引用（目录路径 / SAF tree URI；其余为空）。
+  String get ledgerRef;
+
+  /// 桌面：产物所在目录的本地路径（供"打开所在文件夹"用）；不可用时为 null。
+  String? get localDirectory => null;
 }
 
 /// 普通目录（桌面 / 应用文档目录回退）。
@@ -23,9 +32,18 @@ class DirectoryOutputTarget implements OutputTarget {
   String get describe => dir.path;
 
   @override
+  String get ledgerKind => 'dir';
+
+  @override
+  String get ledgerRef => dir.path;
+
+  @override
+  String? get localDirectory => dir.path;
+
+  @override
   Future<String> save(File source, String name) async {
     dir.createSync(recursive: true);
-    final target = File('${dir.path}/$name');
+    final target = File('${dir.path}${Platform.pathSeparator}$name');
 
     // 安全落位（同名覆盖）：旧文件先改名为 .bak → 再把新文件移入 → 成功后删 .bak；
     // 任一步失败都尽量把旧文件还原，避免"旧文件已删、新文件没写成"的窗口。
@@ -54,7 +72,7 @@ class DirectoryOutputTarget implements OutputTarget {
       rethrow;
     }
     if (backup != null && backup.existsSync()) backup.deleteSync();
-    return name;
+    return target.path;
   }
 }
 
@@ -67,6 +85,15 @@ class SafOutputTarget implements OutputTarget {
 
   @override
   String get describe => '已选文件夹（$displayName）';
+
+  @override
+  String get ledgerKind => 'saf';
+
+  @override
+  String get ledgerRef => treeUri;
+
+  @override
+  String? get localDirectory => null;
 
   @override
   Future<String> save(File source, String name) async {
@@ -87,16 +114,31 @@ class DownloadsOutputTarget implements OutputTarget {
   String get describe => '下载/MP4Fix（默认，可在设置里改）';
 
   @override
+  String get ledgerKind => 'downloads';
+
+  @override
+  String get ledgerRef => '';
+
+  @override
+  String? get localDirectory => null;
+
+  @override
   Future<String> save(File source, String name) => AndroidPlatform.saveToDownloads(
     name: name,
     sourcePath: source.path,
   );
 }
 
-/// 兜底：应用文档目录下的 `MP4Fix/`（无需任何权限）。
+/// 兜底 / 桌面默认：`下载/MP4Fix`（找不到下载目录时退回应用文档目录）。
 Future<OutputTarget> defaultOutputTarget() async {
-  final dir = await getApplicationDocumentsDirectory();
-  final out = Directory('${dir.path}/MP4Fix');
+  Directory? base;
+  try {
+    base = await getDownloadsDirectory();
+  } catch (_) {
+    // 某些平台没有下载目录 → 走应用文档目录
+  }
+  base ??= await getApplicationDocumentsDirectory();
+  final out = Directory('${base.path}${Platform.pathSeparator}MP4Fix');
   if (!out.existsSync()) out.createSync(recursive: true);
   return DirectoryOutputTarget(out);
 }

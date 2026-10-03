@@ -7,6 +7,9 @@
 本仓库是 Kotlin 版 `mp4fix` 的 **Flutter 重写**：引擎改为**纯 Dart**（全平台可用、可 `flutter test`），
 UI 按 Material 3 重构，WebDAV / SAF / 权限等平台能力按 **Android 优先**设计、代码保持可移植。
 
+Windows 端支持**把视频 / 文件夹直接拖进窗口**（也可以把文件拖到 `mp4fix.exe` 图标上打开）；
+修过的文件会记进「修复记录」，下次扫描直接标「已修复」跳过，不重复干活。
+
 ## 下载安装
 
 到 [Releases](https://github.com/U707T/mp4fix/releases/latest) 下载对应 APK：
@@ -26,12 +29,12 @@ UI 按 Material 3 重构，WebDAV / SAF / 权限等平台能力按 **Android 优
 
 | 入口 | 能力 |
 |---|---|
-| **本地文件** | 多选 MP4 / M4V / MOV → 自动检测 → 一键无损修复 → 保存到所选文件夹（原文件不动；**Android 默认存到公共「下载/MP4Fix」**） |
-| **文件夹批量** | 递归扫描整个文件夹（Android 走 SAF），只体检或「扫描并修复」；输出文件夹可选成输入文件夹实现就地覆盖 |
+| **本地文件** | 多选 MP4 / M4V / MOV 或 **拖入窗口**（Windows）→ 自动检测 → 一键修复（原文件不动；**默认存到「下载/MP4Fix」**）；顶部可按 **全部 / 待处理 / 待优化 / 正常 / 问题 / 已完成** 筛选；「全部处理」连正常文件一起重排 |
+| **文件夹批量** | 递归扫描整个文件夹（Android 走 SAF），只体检或「扫描并修复」；输出文件夹可选成输入文件夹实现就地覆盖；已修过的文件会标「已修复」跳过 |
 | **WebDAV** | 填主机/端口/路径/账号 → 测试连接 → 扫描（**只读 moov，不整档下载**）→ 「上传副本」或「保存到本地（服务器全程只读）」 |
-| **设置** | 判定阈值 1/2/4/8 MB、含「可优化」、输出文件夹、主题、清理缓存、关于 |
+| **设置** | 判定阈值 1/2/4/8 MB、含「可优化」、输出文件夹、**文件命名规则**（原名 / 加前缀 / 加后缀）、**修复记录**开关与清空、主题、清理缓存、关于 |
 
-检测结果：**正常 / 需重排 / 可优化（缺 moov 前置）/ 损坏 / 不支持（分片）**，阈值可调
+检测结果：**正常 / 需重排 / 可优化（缺 moov 前置）/ 损坏 / 不支持（分片） / 已修复（复用上次结果）**，阈值可调
 （几十~几百 MB 的交错距离才是卡顿元凶）。
 
 ## 修复原理（不重新编码、画质无损）
@@ -59,7 +62,8 @@ lib/src/webdav/     WebDAV 扫描 / 修复流水线（纯 Dart：dart:io HttpCli
   webdav_scanner.dart   递归扫描 + 健康分类（不支持 Range 自动降级整档下载）
   webdav_fixer.dart     下载 → 无损重排 → 上传副本 / 保存本地（含唯一命名与大小校验）
 lib/src/app/        Material 3 界面（AppController + InheritedNotifier，无额外状态库）
-lib/src/platform/   Android 平台通道（SAF 写入 / content:// 复制到缓存）
+  repair_ledger.dart    修复记录：文件指纹（名称+大小+修改时间）→ 产物位置，扫描时复用
+lib/src/platform/   Android 平台通道（SAF 写入 / content:// 复制到缓存 / 产物存在性查询）
 android/            MainActivity 里的 MethodChannel（`mp4fix/platform`）
 bin/mp4fix_cli.dart 桌面命令行（修复 / 检测 / WebDAV 扫描与修复）
 tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
@@ -72,7 +76,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 - **SAF 写入的数据安全**：`name.mp4fix-part` → 校验大小 → **同名旧文件改名为 `.mp4fix-bak` 让位**
   （而不是先删）→ 改名转正 → 清理备份；任一步失败都会还原旧文件，消除「旧文件已删、新文件没写成」的窗口。
 
-## 测试（58 项，`flutter test`）
+## 测试（79 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -85,7 +89,10 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 | `engine_edge_test.dart` | moov 后置（可优化 → 修复后 faststart）、co64 64 位偏移表 |
 | `webdav_test.dart` | WebDAV 端到端 12 项（中文/空格路径、Range 降级、认证、取消、产物字节校验…） |
 | `webdav_util_test.dart` | URL 工具 + **服务端提前断开时识别"下载不完整"** |
-| `output_target_test.dart` | 落位安全：同名覆盖 / **失败还原旧文件** / 自动建目录 |
+| `output_target_test.dart` | 落位安全：同名覆盖 / **失败还原旧文件** / 自动建目录 / 记录用位置信息 |
+| `name_rule_test.dart` | 命名规则：原名 / 前缀 / 后缀 / 非法字符 / 设置往返 |
+| `repair_ledger_test.dart` | 修复记录：指纹 / 存盘载入 / 淘汰 / 坏文件容错 |
+| `job_filter_test.dart` | 状态与筛选分组（待处理 / 待优化 / 正常 / 问题 / 已完成） |
 | `folder_scan_test.dart` | 目录列举：只挑视频、跳过隐藏目录、容忍无权限子目录 |
 | `error_message_test.dart` · `settings_test.dart` | 错误文案映射 · 设置 JSON 往返 |
 
@@ -113,10 +120,27 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 25 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 79 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
 
-## 本版要点（v2.1.0）
+## 本版要点（v2.4.0）
+
+- **Windows 拖入**：整个窗口都是拖放区，把视频 / 文件夹拖进来即导入「本地文件」并自动体检；
+  也支持把文件拖到 `mp4fix.exe` 上（命令行参数）打开；
+- **修复记录（不重复干活）**：修好的文件按「名称 + 大小 + 修改时间」指纹记账，
+  重新扫描时直接标「已修复（复用上次结果）」并跳过（Android 上还会确认产物确实还在）；
+  单个任务可以「重做」；设置里可关闭或清空记录；
+- **全部处理**：一键把「需重排 / 可优化 / 正常」的文件全部重排（正常文件会弹确认，说明代价）；
+- **筛选按钮**：列表上方新增 全部 / 待处理 / 待优化 / 正常 / 问题 / 已完成 分组，
+  一眼看清哪些是待处理、哪些是待优化；
+- **文件命名规则**（设置 → 文件命名）：原名（同名覆盖）/ 加前缀 / 加后缀 / 前缀+后缀，
+  对所有输出生效（WebDAV 上传副本没改名时保底 `_fixed`，避免覆盖服务器原文件）；
+- Windows 默认输出改到**「下载/MP4Fix」**，页面右上角可**打开输出文件夹**（并定位到最近一次产物）；
+- 修复同一文件不再在「下载/MP4Fix」里堆出 `xxx (1).mp4`（Android MediaStore 改为同名覆盖）；
+- 文件夹扫描（Android）补上总数进度；新增 `name_rule_test` / `repair_ledger_test` / `job_filter_test`，
+  测试总数 79。
+
+### 更早（v2.1.0）
 
 - 修复「本地文件」修复失败的 bug：默认输出目录不存在时没有先创建父目录
   （`PathNotFoundException`），现在写入前会建好目录，并且 IO 错误会显示成可操作的中文提示；
@@ -140,6 +164,9 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ## Windows 版说明
 
 - 解压 `MP4Fix-windows-x64.zip` 后直接运行 `mp4fix.exe`（不需要安装，也不写注册表）；
+- **拖放**：把视频 / 文件夹从资源管理器拖到窗口里即可导入（导入后自动体检）；
+- **用 MP4Fix 打开**：把文件拖到 `mp4fix.exe` 图标上，或用「打开方式」选择它；
+- 默认输出到**「下载/MP4Fix」**，页面右上角的文件夹按钮会在资源管理器里定位到最近一次产物；
 - 输出文件夹用系统目录选择器选；WebDAV 的「本地网络权限」只与 Android 有关，Windows 不需要；
 - 引擎与 Android 完全同一套（纯 Dart），修复结果逐字节一致。
 

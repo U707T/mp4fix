@@ -24,7 +24,7 @@ Future<InspectReport> inspectFileInIsolate(
 
 /// 桌面端目录列举结果（[skipped] 为因权限等原因被跳过的子目录数）。
 typedef VideoFolderListing = ({
-  List<({String path, String rel, int size})> files,
+  List<({String path, String rel, int size, int modifiedMs})> files,
   int skipped,
 });
 
@@ -42,7 +42,7 @@ bool isVideoFileName(String name) {
 /// Windows 上 `System Volume Information`、junction、网络盘等会抛 `errno = 5`，
 /// 之前会让整个扫描直接失败；现在只跳过并计数。
 VideoFolderListing listVideosSync(String rootPath) {
-  final files = <({String path, String rel, int size})>[];
+  final files = <({String path, String rel, int size, int modifiedMs})>[];
   var skipped = 0;
   final stack = <Directory>[Directory(rootPath)];
   final rootLen = rootPath.endsWith(Platform.pathSeparator)
@@ -68,15 +68,19 @@ VideoFolderListing listVideosSync(String rootPath) {
         final name = e.path.split(Platform.pathSeparator).last;
         if (!isVideoFileName(name)) continue;
         int size;
+        int modifiedMs;
         try {
           size = e.lengthSync();
+          modifiedMs = e.lastModifiedSync().millisecondsSinceEpoch;
         } catch (_) {
           size = -1;
+          modifiedMs = 0;
         }
         files.add((
           path: e.path,
           rel: e.path.length > rootLen ? e.path.substring(rootLen) : name,
           size: size,
+          modifiedMs: modifiedMs,
         ));
       }
     }

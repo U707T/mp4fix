@@ -139,6 +139,21 @@ class WebDavScanner {
     return results;
   }
 
+  /// 重新检测单个文件（界面「重做」用）：按原 URL / 大小再做一次同样的检测。
+  Future<ScanItem> inspectSingle(
+    ScanItem item, {
+    required Directory tempDir,
+    bool Function()? isCancelled,
+  }) {
+    final entry = DavEntry(
+      url: item.url,
+      name: item.name,
+      isDirectory: false,
+      size: item.size,
+    );
+    return _inspectFile(entry, item.path, tempDir, isCancelled);
+  }
+
   Future<ScanItem> _inspectFile(
     DavEntry entry,
     String relPath,

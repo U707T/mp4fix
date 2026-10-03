@@ -19,6 +19,7 @@ enum JobStatus {
   fixing,
   saved,
   uploaded,
+  reused,
   failed,
   cancelled,
 }
@@ -36,6 +37,7 @@ extension JobStatusX on JobStatus {
     JobStatus.fixing => '修复中',
     JobStatus.saved => '已保存',
     JobStatus.uploaded => '已上传',
+    JobStatus.reused => '已修复',
     JobStatus.failed => '失败',
     JobStatus.cancelled => '已取消',
   };
@@ -57,7 +59,42 @@ extension JobStatusX on JobStatus {
   bool get good =>
       this == JobStatus.ok ||
       this == JobStatus.saved ||
-      this == JobStatus.uploaded;
+      this == JobStatus.uploaded ||
+      this == JobStatus.reused;
+
+  /// 由本工具完成（保存 / 上传 / 复用上次结果）。
+  bool get finished =>
+      this == JobStatus.saved ||
+      this == JobStatus.uploaded ||
+      this == JobStatus.reused;
+}
+
+/// 任务列表的筛选分组（列表上方的「额外按钮」）。
+enum JobFilter { all, todo, optimize, ok, problem, finished }
+
+extension JobFilterX on JobFilter {
+  String get label => switch (this) {
+    JobFilter.all => '全部',
+    JobFilter.todo => '待处理',
+    JobFilter.optimize => '待优化',
+    JobFilter.ok => '正常',
+    JobFilter.problem => '问题',
+    JobFilter.finished => '已完成',
+  };
+
+  bool matches(JobStatus s) => switch (this) {
+    JobFilter.all => true,
+    JobFilter.todo =>
+      s == JobStatus.pending ||
+          s == JobStatus.inspecting ||
+          s == JobStatus.fixing ||
+          s == JobStatus.needsFix ||
+          s == JobStatus.cancelled,
+    JobFilter.optimize => s == JobStatus.optimizable,
+    JobFilter.ok => s == JobStatus.ok,
+    JobFilter.problem => s.problematic,
+    JobFilter.finished => s.finished,
+  };
 }
 
 /// 规范化"用户选中的路径"：去掉 `file://` 前缀、包裹引号与首尾空白。
@@ -123,6 +160,8 @@ class FixJob {
     required this.size,
     this.localPath,
     this.webDavUrl,
+    this.sourceUri,
+    this.modifiedMs = 0,
   });
 
   final String id;
@@ -138,6 +177,13 @@ class FixJob {
 
   /// 远端 URL（WebDAV 任务）。
   String? webDavUrl;
+
+  /// Android SAF 文档 URI（文件夹任务；「重做」时用它重新复制到缓存）。
+  String? sourceUri;
+
+  /// 文件的最后修改时间（毫秒；0 = 未知）。
+  /// 与 [size] 一起构成修复记录的指纹 —— 文件一变，记录自动失效。
+  int modifiedMs;
 
   JobStatus status = JobStatus.pending;
   String message = '';
@@ -207,6 +253,71 @@ class WebDavConfig {
   }
 }
 
+/// 输出文件命名规则（在「设置 → 文件命名」里配置，对所有输出生效）。
+enum OutputNameMode {
+  /// 原样：修好后仍然叫 `原名.mp4`（同名覆盖）。
+  original,
+
+  /// 加前缀：`前缀原名.mp4`。
+  prefix,
+
+  /// 加后缀：`原名后缀.mp4`（如 `_fixed`）。
+  suffix,
+
+  /// 前缀 + 后缀。
+  both;
+
+  String get label => switch (this) {
+    OutputNameMode.original => '原名',
+    OutputNameMode.prefix => '加前缀',
+    OutputNameMode.suffix => '加后缀',
+    OutputNameMode.both => '前缀+后缀',
+  };
+}
+
+/// 清洗用户填写的文件名前后缀：去掉非法字符与首尾空白 / 点号。
+///
+/// Windows 上 `\ / : * ? " < > |` 与首尾空格 / 点号都不允许出现在文件名里；
+/// Android 的 SAF 提供方对其中一部分同样敏感 —— 统一在这里清掉。
+String sanitizeNamePart(String raw) {
+  var s = raw.replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1f]'), '');
+  s = s.replaceAll(RegExp(r'^[\s.]+|[\s.]+$'), '');
+  return s;
+}
+
+/// 按命名规则生成输出文件名（[fileName] 为原文件名，如 `a.m4v`）。
+///
+/// 规则里的前缀 / 后缀为空时视为不生效（避免生成同名文件）。
+/// 结果为空或与原文件同名时，回落到原文件名。
+String applyNameRule(
+  String fileName, {
+  required OutputNameMode mode,
+  String prefix = '',
+  String suffix = '',
+}) {
+  if (mode == OutputNameMode.original) return fileName;
+  final cleanPrefix = sanitizeNamePart(prefix);
+  final cleanSuffix = sanitizeNamePart(suffix);
+  final usePrefix =
+      (mode == OutputNameMode.prefix || mode == OutputNameMode.both) &&
+      cleanPrefix.isNotEmpty;
+  final useSuffix =
+      (mode == OutputNameMode.suffix || mode == OutputNameMode.both) &&
+      cleanSuffix.isNotEmpty;
+  if (!usePrefix && !useSuffix) return fileName;
+
+  final dot = fileName.lastIndexOf('.');
+  final hasExt = dot > 0 && dot < fileName.length - 1;
+  var base = hasExt ? fileName.substring(0, dot) : fileName;
+  final ext = hasExt ? fileName.substring(dot) : '';
+
+  if (usePrefix) base = '$cleanPrefix$base';
+  if (useSuffix) base = '$base$cleanSuffix';
+  base = sanitizeNamePart(base);
+  if (base.isEmpty) return fileName;
+  return '$base$ext';
+}
+
 /// 应用设置（可持久化）。
 class AppSettings {
   AppSettings({
@@ -219,6 +330,10 @@ class AppSettings {
     this.scanInputDirPath,
     this.rememberWebDavPassword = false,
     this.webDavPassword = '',
+    this.reuseRepairs = true,
+    this.nameMode = OutputNameMode.original,
+    this.namePrefix = '',
+    this.nameSuffix = '_fixed',
     WebDavConfig? webdav,
   }) : webdav = webdav ?? WebDavConfig();
 
@@ -238,6 +353,39 @@ class AppSettings {
 
   /// 桌面：文件夹批量检测的输入目录（普通路径）。
   String? scanInputDirPath;
+
+  /// 是否记住修复记录：重新扫描时认出已修复过的文件，跳过（复用上次结果）。
+  bool reuseRepairs;
+
+  /// 输出文件命名规则。
+  OutputNameMode nameMode;
+  String namePrefix;
+  String nameSuffix;
+
+  /// 按当前命名规则生成输出文件名。
+  String applyOutputName(String fileName) => applyNameRule(
+    fileName,
+    mode: nameMode,
+    prefix: namePrefix,
+    suffix: nameSuffix,
+  );
+
+  /// 命名规则的指纹：规则一变，旧的修复记录自动失效（重新处理）。
+  String get nameRuleId =>
+      '${nameMode.name}|${sanitizeNamePart(namePrefix)}|'
+      '${sanitizeNamePart(nameSuffix)}';
+
+  /// 命名规则的展示文案（规则不生效时为空）——例如 `命名 原名_fixed`。
+  String get nameRuleHint {
+    if (applyOutputName('x.mp4') == 'x.mp4') return '';
+    return switch (nameMode) {
+      OutputNameMode.prefix => '命名 ${sanitizeNamePart(namePrefix)}原名',
+      OutputNameMode.suffix => '命名 原名${sanitizeNamePart(nameSuffix)}',
+      OutputNameMode.both =>
+        '命名 ${sanitizeNamePart(namePrefix)}原名${sanitizeNamePart(nameSuffix)}',
+      OutputNameMode.original => '',
+    };
+  }
 
   WebDavConfig webdav;
 
@@ -260,6 +408,10 @@ class AppSettings {
     'scanInputDirPath': scanInputDirPath,
     'rememberWebDavPassword': rememberWebDavPassword,
     'webDavPassword': webDavPassword,
+    'reuseRepairs': reuseRepairs,
+    'nameMode': nameMode.name,
+    'namePrefix': namePrefix,
+    'nameSuffix': nameSuffix,
     'webdav': webdav.toJson(),
   };
 
@@ -276,6 +428,13 @@ class AppSettings {
     scanInputDirPath: json['scanInputDirPath'] as String?,
     rememberWebDavPassword: json['rememberWebDavPassword'] as bool? ?? false,
     webDavPassword: json['webDavPassword'] as String? ?? '',
+    reuseRepairs: json['reuseRepairs'] as bool? ?? true,
+    nameMode: OutputNameMode.values.firstWhere(
+      (m) => m.name == json['nameMode'],
+      orElse: () => OutputNameMode.original,
+    ),
+    namePrefix: json['namePrefix'] as String? ?? '',
+    nameSuffix: json['nameSuffix'] as String? ?? '_fixed',
     webdav: WebDavConfig.fromJson(
       (json['webdav'] as Map?)?.cast<String, Object?>() ?? const {},
     ),

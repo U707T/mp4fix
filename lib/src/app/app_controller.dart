@@ -15,6 +15,7 @@ import '../webdav/webdav.dart';
 import 'engine_tasks.dart';
 import 'models.dart';
 import 'output_target.dart';
+import 'repair_ledger.dart';
 import 'settings_store.dart';
 
 /// 应用状态：设置 + 任务队列 + 三个功能入口的流程编排。
@@ -29,6 +30,12 @@ class AppController extends ChangeNotifier {
 
   /// 本地文件的临时目录（缓存）。
   Directory? _cacheDir;
+
+  /// 修复记录：记住"哪个文件修好后产物在哪"，下次扫描直接复用。
+  RepairLedger ledger = RepairLedger.empty();
+
+  /// 最近一次产物路径（桌面：供「打开所在文件夹」定位）。
+  String? lastSavedPath;
 
   /// 最近一次操作的补充提示（如"跳过了 N 个无法读取的文件夹"）。
   String? lastNotice;
@@ -69,6 +76,23 @@ class AppController extends ChangeNotifier {
   bool hasFixable(JobSource source) =>
       jobs.any((j) => j.source == source && j.status.fixable);
 
+  /// 可修复（问题项）数量。
+  int fixableCount(JobSource source) =>
+      jobs.where((j) => j.source == source && j.status.fixable).length;
+
+  /// "全部处理"会覆盖的数量：问题项 + 正常项（正常项也会被重新重排）。
+  int processAllCount(JobSource source) => jobs
+      .where(
+        (j) =>
+            j.source == source &&
+            (j.status.fixable || j.status == JobStatus.ok),
+      )
+      .length;
+
+  /// 其中判定为"正常"、但会被一并重排的数量。
+  int normalCount(JobSource source) =>
+      jobs.where((j) => j.source == source && j.status == JobStatus.ok).length;
+
   List<FixJob> jobsOf(JobSource source) =>
       jobs.where((j) => j.source == source).toList(growable: false);
 
@@ -80,6 +104,7 @@ class AppController extends ChangeNotifier {
     if (settings.rememberWebDavPassword && settings.webDavPassword.isNotEmpty) {
       webDavPassword = settings.webDavPassword;
     }
+    await _initLedger();
     // 桌面：提前建好默认输出目录，避免首次修复因"目录不存在"失败
     if (!AndroidPlatform.isSupported) {
       try {
@@ -92,19 +117,69 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 载入修复记录（应用支持目录；失败时退化为纯内存记录）。
+  Future<void> _initLedger() async {
+    File? file;
+    for (final resolver in <Future<Directory> Function()>[
+      getApplicationSupportDirectory,
+      getApplicationDocumentsDirectory,
+    ]) {
+      try {
+        final dir = await resolver();
+        file = File('${dir.path}${Platform.pathSeparator}repair_ledger.json');
+        break;
+      } catch (_) {
+        // 换下一个目录
+      }
+    }
+    ledger = await RepairLedger.load(file);
+  }
+
+  Timer? _ledgerTimer;
+  bool _ledgerDirty = false;
+
+  /// 修复记录落盘（合并 2 秒内的多次写入）。
+  void _scheduleLedgerSave() {
+    _ledgerDirty = true;
+    _ledgerTimer ??= Timer(const Duration(seconds: 2), () {
+      _ledgerTimer = null;
+      final dirty = _ledgerDirty;
+      _ledgerDirty = false;
+      if (dirty) unawaited(ledger.save());
+    });
+  }
+
+  /// 立即把修复记录写盘（批处理结束时调用）。
+  Future<void> flushLedger() async {
+    if (!_ledgerDirty) return;
+    _ledgerDirty = false;
+    await ledger.save();
+  }
+
+  /// 清空修复记录（设置页「维护」用）。
+  void clearLedger() {
+    ledger.clear();
+    notifyListeners();
+    unawaited(ledger.save());
+  }
+
+  int get ledgerLength => ledger.length;
+
   /// 收集诊断信息（路径 / 是否存在 / 平台），便于远程排查。
   Future<String> collectDiagnostics() async {
     final lines = <String>[
       'MP4Fix 诊断信息',
       '平台: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
       '设置: 阈值 ${settings.thresholdMb}MB · 含可优化=${settings.includeOptimizable}',
+      '命名规则: ${settings.nameRuleId}',
+      '复用修复记录: ${settings.reuseRepairs}（${ledger.length} 条）',
       '输出目标: $outputDescription',
     ];
     if (AndroidPlatform.isSupported) {
       lines.add('输出(SAF): ${settings.outputTreeUri ?? "（未选择 → 默认 下载/MP4Fix）"}');
     } else {
       final dir = settings.outputDirPath;
-      lines.add('输出目录: ${dir ?? "（未选择 → 默认 应用文档目录/MP4Fix）"}');
+      lines.add('输出目录: ${dir ?? "（未选择 → 默认 下载/MP4Fix）"}');
       if (dir != null) lines.add('输出目录存在: ${Directory(dir).existsSync()}');
       final scan = settings.scanInputDirPath;
       lines.add('输入目录: ${scan ?? "-"}');
@@ -148,6 +223,8 @@ class AppController extends ChangeNotifier {
     required int size,
     String? localPath,
     String? webDavUrl,
+    String? sourceUri,
+    int modifiedMs = 0,
   }) {
     final job = FixJob(
       id: '${DateTime.now().microsecondsSinceEpoch}-${_seq++}',
@@ -157,6 +234,8 @@ class AppController extends ChangeNotifier {
       size: size,
       localPath: localPath,
       webDavUrl: webDavUrl,
+      sourceUri: sourceUri,
+      modifiedMs: modifiedMs,
     );
     jobs.add(job);
     notifyListeners();
@@ -239,6 +318,122 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  // ---------------------------------------------------------------- 修复记录
+
+  /// 任务的记录指纹。
+  String _jobLedgerKey(FixJob job) => job.source == JobSource.webdav
+      ? ledgerKeyRemote(url: job.webDavUrl ?? job.name, size: job.size)
+      : ledgerKeyFile(
+          name: job.name,
+          size: job.size,
+          modifiedMs: job.modifiedMs,
+        );
+
+  /// 取出与当前设置匹配的记录（复用开关 / 命名规则 / 指纹都要对得上）。
+  RepairRecord? _recordFor(FixJob job) {
+    if (!settings.reuseRepairs) return null;
+    final record = ledger.lookup(_jobLedgerKey(job));
+    if (record == null) return null;
+    if (record.rule != settings.nameRuleId) return null;
+    return record;
+  }
+
+  bool _markReused(FixJob job, RepairRecord record) {
+    job.status = JobStatus.reused;
+    job.outputPath = record.out;
+    job.message = '复用上次修复结果：${record.out}（${record.mode}）';
+    notifyListeners();
+    return true;
+  }
+
+  /// 同步版复用检查（扫描回调里用）：只处理能同步确认的记录
+  /// （远端副本 / 桌面目录）；Android SAF 与下载目录需要异步查询。
+  bool _tryReuseSync(FixJob job) {
+    final record = _recordFor(job);
+    if (record == null) return false;
+    final exists = switch (record.kind) {
+      'remote' => true,
+      'dir' => File(
+        '${record.ref}${Platform.pathSeparator}${record.out}',
+      ).existsSync(),
+      _ => false,
+    };
+    if (!exists) return false;
+    return _markReused(job, record);
+  }
+
+  /// 异步版复用检查（Android 上还会问一句"产物还在吗"）。
+  Future<bool> _tryReuse(FixJob job) async {
+    final record = _recordFor(job);
+    if (record == null) return false;
+    final exists = await _verifyRecord(record);
+    if (!exists) {
+      // 产物已经不在了 → 记录失效，重新处理
+      ledger.remove(record.key);
+      _scheduleLedgerSave();
+      return false;
+    }
+    return _markReused(job, record);
+  }
+
+  Future<bool> _verifyRecord(RepairRecord record) async {
+    switch (record.kind) {
+      case 'remote':
+        return true;
+      case 'dir':
+        return File(
+          '${record.ref}${Platform.pathSeparator}${record.out}',
+        ).existsSync();
+      case 'saf':
+        return AndroidPlatform.existsInTree(record.ref, record.out);
+      case 'downloads':
+        return AndroidPlatform.existsInDownloads(record.out);
+      default:
+        return true;
+    }
+  }
+
+  void _recordRepair({
+    required FixJob job,
+    required String outName,
+    required String kind,
+    required String ref,
+    required String mode,
+  }) {
+    ledger.put(
+      RepairRecord(
+        key: _jobLedgerKey(job),
+        name: job.name,
+        size: job.size,
+        modifiedMs: job.modifiedMs,
+        out: outName,
+        kind: kind,
+        ref: ref,
+        mode: mode,
+        rule: settings.nameRuleId,
+        at: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+    _scheduleLedgerSave();
+  }
+
+  /// 按命名规则生成输出文件名；WebDAV 上传副本还要保证不与原文件同名
+  /// （规则没改名时保底用 `_fixed` 后缀）。
+  String _outputName(FixJob job) {
+    final dot = job.name.lastIndexOf('.');
+    final base = dot > 0 ? job.name.substring(0, dot) : job.name;
+    return settings.applyOutputName('$base.mp4');
+  }
+
+  String _webDavCopyName(FixJob job) {
+    final renamed = settings.applyOutputName(job.name);
+    if (renamed != job.name) return renamed;
+    final dot = job.name.lastIndexOf('.');
+    final base = dot > 0 ? job.name.substring(0, dot) : job.name;
+    final ext = dot > 0 ? job.name.substring(dot + 1) : 'mp4';
+    return '${base}_fixed.$ext';
+  }
+
   // ---------------------------------------------------------------- 输出目标
 
   Future<OutputTarget> outputTarget() async {
@@ -299,8 +494,7 @@ class AppController extends ChangeNotifier {
     }
     final dir = settings.outputDirPath;
     if (dir != null && dir.isNotEmpty) return '输出：$dir';
-    if (AndroidPlatform.isSupported) return '输出：下载/MP4Fix（默认）';
-    return '输出：应用文档目录/MP4Fix（默认）';
+    return '输出：下载/MP4Fix（默认）';
   }
 
   /// 当前阈值 / 可优化设置的展示文案。
@@ -363,6 +557,119 @@ class AppController extends ChangeNotifier {
     }
   }
 
+  /// 桌面：在文件管理器里打开产物位置（最近一次产物 / 输出文件夹）。
+  bool get canOpenOutputLocation => !AndroidPlatform.isSupported;
+
+  Future<void> openOutputLocation() async {
+    if (AndroidPlatform.isSupported) return;
+    try {
+      final target = await outputTarget();
+      final dir = target.localDirectory;
+      final last = lastSavedPath;
+      final hasLast = last != null && File(last).existsSync();
+      if (dir != null && !Directory(dir).existsSync()) {
+        Directory(dir).createSync(recursive: true);
+      }
+      if (Platform.isWindows) {
+        if (hasLast) {
+          await Process.start(
+            'explorer.exe',
+            ['/select,${last.replaceAll('/', r'\')}'],
+            mode: ProcessStartMode.detached,
+          );
+        } else if (dir != null) {
+          await Process.start(
+            'explorer.exe',
+            [dir],
+            mode: ProcessStartMode.detached,
+          );
+        }
+      } else if (Platform.isMacOS) {
+        if (hasLast) {
+          await Process.start('open', ['-R', last],
+              mode: ProcessStartMode.detached);
+        } else if (dir != null) {
+          await Process.start('open', [dir], mode: ProcessStartMode.detached);
+        }
+      } else if (dir != null) {
+        await Process.start('xdg-open', [dir], mode: ProcessStartMode.detached);
+      }
+    } catch (e) {
+      lastNotice = _message(e);
+      notifyListeners();
+    }
+  }
+
+  // ---------------------------------------------------------------- 拖入 / 命令行导入
+
+  /// 把路径导入「本地文件」列表：文件直接加，文件夹递归展开（mp4 / m4v / mov）。
+  ///
+  /// 供 Windows 端「拖入窗口」与「用 MP4Fix 打开文件」（命令行参数）使用。
+  Future<int> importPaths(List<String> paths, {String reason = '拖入'}) async {
+    if (running) {
+      lastNotice = '有任务正在运行，稍后再拖入';
+      notifyListeners();
+      return 0;
+    }
+    lastNotice = null;
+    final created = <FixJob>[];
+    for (final raw in paths) {
+      final path = normalizePickedPath(raw);
+      if (path.isEmpty) continue;
+      final dir = Directory(path);
+      final file = File(path);
+      if (dir.existsSync()) {
+        try {
+          final listing = await Isolate.run(() => listVideosSync(path));
+          for (final f in listing.files) {
+            created.add(
+              _newJob(
+                source: JobSource.local,
+                name: f.path.split(Platform.pathSeparator).last,
+                displayPath: f.rel,
+                size: f.size,
+                localPath: f.path,
+                modifiedMs: f.modifiedMs,
+              ),
+            );
+          }
+        } catch (_) {
+          // 单个文件夹失败不影响其它
+        }
+      } else if (file.existsSync()) {
+        final name = path.split(Platform.pathSeparator).last;
+        if (!isVideoFileName(name)) continue;
+        created.add(
+          _newJob(
+            source: JobSource.local,
+            name: name,
+            displayPath: name,
+            size: file.lengthSync(),
+            localPath: path,
+            modifiedMs: _modifiedMs(file),
+          ),
+        );
+      }
+    }
+    if (created.isEmpty) {
+      lastNotice = '没有找到可处理的视频（支持 mp4 / m4v / mov）';
+      notifyListeners();
+      return 0;
+    }
+    lastNotice = '$reason：已导入 ${created.length} 个视频';
+    notifyListeners();
+    await _inspectLocalJobs(created);
+    return created.length;
+  }
+
+  static int _modifiedMs(File file) {
+    try {
+      return file.lastModifiedSync().millisecondsSinceEpoch;
+    } catch (_) {
+      return 0;
+    }
+  }
+
   // ---------------------------------------------------------------- 本地文件
 
   /// 选择本地视频（多选）。
@@ -392,46 +699,148 @@ class AppController extends ChangeNotifier {
       created.add(_newJob(
         source: JobSource.local,
         name: f.name,
-        displayPath: f.name,
+        // 桌面显示完整路径（同名文件在不同文件夹时一眼可分），Android 只显示文件名
+        displayPath: AndroidPlatform.isSupported ? f.name : path,
         size: f.lengthSync() ?? -1,
         localPath: path,
+        modifiedMs: _modifiedMs(File(path)),
       ));
     }
     if (created.isEmpty) return;
     await _inspectLocalJobs(created);
     if (fixAfterPick && !_cancelRequested) {
-      await fixJobs(JobSource.local, created.where((j) => j.status.fixable).toList());
+      final fixable = created.where((j) => j.status.fixable).toList();
+      if (fixable.isEmpty) {
+        lastNotice = '检测完成：没有需要重排的视频';
+        notifyListeners();
+      } else {
+        await fixJobs(JobSource.local, fixable);
+      }
     }
   }
 
   Future<void> _inspectLocalJobs(List<FixJob> targets) async {
+    if (targets.isEmpty) return;
     _setRunning(targets.first.source);
     _setBatch(targets.length);
     for (var li = 0; li < targets.length; li++) {
       final job = targets[li];
       if (_cancelRequested) break;
-      final path = job.localPath;
-      if (path == null) continue;
-      job.status = JobStatus.inspecting;
-      job.message = '读取文件头与 moov…';
-      job.progress = 0;
-      notifyListeners();
-      try {
-        final report = await inspectFileInIsolate(
-          path,
-          thresholdBytes: settings.thresholdBytes,
-        );
-        _applyReport(job, report);
-      } catch (e) {
-        job.status = JobStatus.error;
-        job.message = _message(e);
-      }
+      await _inspectLocalJob(job);
       _tickBatch(li + 1);
     }
     _setRunning(null);
     batchDone = 0;
     batchTotal = 0;
     notifyListeners();
+  }
+
+  /// 检测单个本地任务（含「已修复」复用判定）。
+  Future<void> _inspectLocalJob(FixJob job) async {
+    final path = job.localPath;
+    if (path == null) {
+      job.status = JobStatus.error;
+      job.message = '缺少本地文件';
+      notifyListeners();
+      return;
+    }
+    job.status = JobStatus.inspecting;
+    job.message = '读取文件头与 moov…';
+    job.progress = 0;
+    notifyListeners();
+    try {
+      final report = await inspectFileInIsolate(
+        path,
+        thresholdBytes: settings.thresholdBytes,
+      );
+      _applyReport(job, report);
+    } catch (e) {
+      job.status = JobStatus.error;
+      job.message = _message(e);
+    }
+    // 修过的文件直接标记「复用上次结果」（文件没变过才会命中）
+    await _tryReuse(job);
+    notifyListeners();
+  }
+
+  /// 重新处理一条任务（清掉它的修复记录，重新检测 + 修复）。
+  Future<void> redoJob(FixJob job) async {
+    if (running || job.busy) return;
+    if (ledger.remove(_jobLedgerKey(job))) _scheduleLedgerSave();
+    job.status = JobStatus.pending;
+    job.message = '重新检测…';
+    job.outputPath = null;
+    job.progress = 0;
+    notifyListeners();
+
+    if (job.source == JobSource.webdav) {
+      await _reInspectWebDav(job);
+      if (job.status.fixable) await fixWebDavJobs(only: [job]);
+      return;
+    }
+    // Android SAF：复用跳过了"复制到缓存"，重做时补上
+    if (job.localPath == null &&
+        job.sourceUri != null &&
+        AndroidPlatform.isSupported) {
+      _setRunning(job.source);
+      job.message = '复制到缓存…';
+      notifyListeners();
+      try {
+        job.localPath = await AndroidPlatform.copyToCache(
+          uri: job.sourceUri!,
+          name: job.name,
+        );
+      } catch (e) {
+        job.status = JobStatus.error;
+        job.message = _message(e);
+        _setRunning(null);
+        notifyListeners();
+        return;
+      }
+      _setRunning(null);
+    }
+    await _inspectLocalJob(job);
+    if (job.status.fixable) await fixJobs(job.source, [job]);
+  }
+
+  /// 重新检测一条 WebDAV 任务（「重做」用）。
+  Future<void> _reInspectWebDav(FixJob job) async {
+    final item = _webDavItems[job.id];
+    if (item == null) {
+      job.status = JobStatus.error;
+      job.message = '扫描信息已清空，请重新扫描';
+      notifyListeners();
+      return;
+    }
+    final client = _webDavClient();
+    _setRunning(JobSource.webdav);
+    job.status = JobStatus.inspecting;
+    job.message = '重新读取 moov…';
+    notifyListeners();
+    try {
+      await _ensureLocalNetworkPermission();
+      final cache = await _cache();
+      final scanner = WebDavScanner(client, threshold: settings.thresholdBytes);
+      final fresh = await scanner.inspectSingle(
+        item,
+        tempDir: cache,
+        isCancelled: () => _cancelRequested,
+      );
+      _webDavItems[job.id] = fresh;
+      if (fresh.report != null) {
+        _applyReport(job, fresh.report!);
+      } else {
+        job.status = JobStatus.error;
+        job.message = fresh.error ?? '检测失败';
+      }
+    } catch (e) {
+      job.status = JobStatus.error;
+      job.message = _message(e);
+    } finally {
+      client.close();
+      _setRunning(null);
+      notifyListeners();
+    }
   }
 
   void _applyReport(FixJob job, InspectReport report) {
@@ -473,17 +882,26 @@ class AppController extends ChangeNotifier {
       }
       _setRunning(JobSource.folder);
       final entries = await _listTreeVideos(tree);
-      for (final e in entries) {
+      _setBatch(entries.length);
+      for (var i = 0; i < entries.length; i++) {
         if (_cancelRequested) break;
+        final e = entries[i];
         final job = _newJob(
           source: JobSource.folder,
           name: e.name,
           displayPath: e.path,
           size: e.size,
+          sourceUri: e.uri,
+          modifiedMs: e.modifiedMs,
         );
         targets.add(job);
+        // 已修复过（产物还在）→ 跳过复制 + 检测
+        if (await _tryReuse(job)) {
+          _tickBatch(i + 1);
+          continue;
+        }
         job.status = JobStatus.inspecting;
-        job.message = '复制的缓存中…';
+        job.message = '复制到缓存…';
         notifyListeners();
         try {
           final local = await AndroidPlatform.copyToCache(
@@ -501,6 +919,7 @@ class AppController extends ChangeNotifier {
           job.message = _message(err);
         }
         notifyListeners();
+        _tickBatch(i + 1);
       }
     } else {
       final dirPath = settings.scanInputDirPath;
@@ -525,6 +944,7 @@ class AppController extends ChangeNotifier {
           displayPath: f.rel,
           size: f.size,
           localPath: f.path,
+          modifiedMs: f.modifiedMs,
         );
         targets.add(job);
         job.status = JobStatus.inspecting;
@@ -539,12 +959,12 @@ class AppController extends ChangeNotifier {
           job.status = JobStatus.error;
           job.message = _message(err);
         }
+        // 已修复过（产物还在）→ 标记复用，后面的"修复"会跳过它
+        await _tryReuse(job);
         _tickBatch(li + 1);
       }
     }
-
   }
-
 
   static bool _isVideoName(String name) {
     final dot = name.lastIndexOf('.');
@@ -553,11 +973,19 @@ class AppController extends ChangeNotifier {
     return ext == 'mp4' || ext == 'm4v' || ext == 'mov';
   }
 
-  /// SAF 树递归列举视频（返回 uri / 展示路径 / 名称 / 大小）。
-  Future<List<({String uri, String path, String name, int size})>>
-      _listTreeVideos(String treeUri) async {
+  /// SAF 树递归列举视频（返回 uri / 展示路径 / 名称 / 大小 / 修改时间）。
+  Future<
+      List<
+          ({
+            String uri,
+            String path,
+            String name,
+            int size,
+            int modifiedMs,
+          })>> _listTreeVideos(String treeUri) async {
     final saf = SafUtil();
-    final out = <({String uri, String path, String name, int size})>[];
+    final out =
+        <({String uri, String path, String name, int size, int modifiedMs})>[];
     final stack = <({String uri, String rel})>[(uri: treeUri, rel: '')];
     final visited = <String>{};
     const skip = {
@@ -588,7 +1016,13 @@ class AppController extends ChangeNotifier {
           if (skip.contains(name.toLowerCase())) continue;
           stack.add((uri: child.uri, rel: rel));
         } else if (_isVideoName(name)) {
-          out.add((uri: child.uri, path: rel, name: name, size: child.length));
+          out.add((
+            uri: child.uri,
+            path: rel,
+            name: name,
+            size: child.length,
+            modifiedMs: child.lastModified,
+          ));
         }
       }
     }
@@ -680,6 +1114,8 @@ class AppController extends ChangeNotifier {
           );
           if (item.report != null) {
             _applyReport(job, item.report!);
+            // 上次已修过（记录在案）→ 标记复用，不再重复下载重排
+            _tryReuseSync(job);
           } else {
             job.status = JobStatus.error;
             job.message = item.error ?? '检测失败';
@@ -700,7 +1136,11 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> fixWebDavJobs({bool? uploadCopies, List<FixJob>? only}) async {
+  Future<void> fixWebDavJobs({
+    bool? uploadCopies,
+    List<FixJob>? only,
+    bool processAll = false,
+  }) async {
     if (running) return;
     uploadCopies ??= webDavUploadCopies;
     webDavUploadCopies = uploadCopies;
@@ -712,7 +1152,12 @@ class AppController extends ChangeNotifier {
       await _ensureLocalNetworkPermission();
       final targets = only ??
           jobs
-              .where((j) => j.source == JobSource.webdav && j.status.fixable)
+              .where(
+                (j) =>
+                    j.source == JobSource.webdav &&
+                    (j.status.fixable ||
+                        (processAll && j.status == JobStatus.ok)),
+              )
               .toList();
       _setBatch(targets.length);
       final output = uploadCopies ? null : await outputTarget();
@@ -727,8 +1172,10 @@ class AppController extends ChangeNotifier {
         notifyListeners();
 
         if (uploadCopies) {
+          final copyName = _webDavCopyName(job);
           final result = await fixer.fix(
             item,
+            copyName: copyName,
             onPhase: (phase, progress) {
               job.message = '$phase ${(progress * 100).round()}%';
               job.progress = progress;
@@ -737,6 +1184,15 @@ class AppController extends ChangeNotifier {
             isCancelled: () => _cancelRequested,
           );
           _applyFixResult(job, result, uploaded: true);
+          if (result.ok && result.remoteName != null) {
+            _recordRepair(
+              job: job,
+              outName: result.remoteName!,
+              kind: 'remote',
+              ref: '',
+              mode: 'WebDAV 上传副本',
+            );
+          }
         } else {
           final tmp = File('${cache.path}/${job.id}-fixed.mp4');
           try {
@@ -750,13 +1206,32 @@ class AppController extends ChangeNotifier {
               },
               isCancelled: () => _cancelRequested,
             );
-            if (result.ok) {
-              final saved = await output!.save(tmp, job.name);
-              job.outputPath = saved;
-              job.status = JobStatus.saved;
-              job.message = '已保存：$saved';
+            if (result.cancelled) {
+              job.status = JobStatus.cancelled;
+              job.message = '已取消';
+            } else if (!result.ok) {
+              job.status = JobStatus.failed;
+              job.message = '失败：${result.message}';
+            } else {
+              final outName = settings.applyOutputName(job.name);
+              try {
+                final saved = await output!.save(tmp, outName);
+                job.outputPath = saved;
+                job.status = JobStatus.saved;
+                job.message = '已保存：$saved';
+                if (output.ledgerKind == 'dir') lastSavedPath = saved;
+                _recordRepair(
+                  job: job,
+                  outName: outName,
+                  kind: output.ledgerKind,
+                  ref: output.ledgerRef,
+                  mode: 'WebDAV 保存到本地',
+                );
+              } catch (e) {
+                job.status = JobStatus.failed;
+                job.message = '保存失败：${_message(e)}';
+              }
             }
-            _applyFixResult(job, result, uploaded: false);
           } finally {
             if (tmp.existsSync()) tmp.deleteSync();
           }
@@ -770,6 +1245,7 @@ class AppController extends ChangeNotifier {
       batchDone = 0;
       batchTotal = 0;
       notifyListeners();
+      await flushLedger();
     }
   }
 
@@ -791,11 +1267,26 @@ class AppController extends ChangeNotifier {
 
   // ---------------------------------------------------------------- 批量修复
 
-  /// 修复某来源下所有"可修复"的任务。
-  Future<void> fixJobs(JobSource source, [List<FixJob>? only]) async {
+  /// 修复某来源下的任务。
+  ///
+  /// - 默认只处理"可修复"（需重排 / 可优化）的那些；
+  /// - [processAll] 为真时连判定为"正常"的也一起重排（"全部处理"）；
+  /// - 已标记「已修复（复用）」的任务会跳过（单条「重做」才会重新处理）。
+  Future<void> fixJobs(
+    JobSource source, [
+    List<FixJob>? only,
+    bool processAll = false,
+  ]) async {
     if (running) return;
     final targets = only ??
-        jobs.where((j) => j.source == source && j.status.fixable).toList();
+        jobs
+            .where(
+              (j) =>
+                  j.source == source &&
+                  (j.status.fixable ||
+                      (processAll && j.status == JobStatus.ok)),
+            )
+            .toList();
     if (targets.isEmpty) return;
     _setRunning(source);
     _setBatch(targets.length);
@@ -820,10 +1311,7 @@ class AppController extends ChangeNotifier {
         job.message = '修复中…';
         notifyListeners();
 
-        final base = job.name.contains('.')
-            ? job.name.substring(0, job.name.lastIndexOf('.'))
-            : job.name;
-        final outName = '$base.mp4';
+        final outName = _outputName(job);
         // 注意：**一律**先修复到缓存里的独立临时文件，再交给 OutputTarget 落位。
         // 不能直接写输出目录：若用户把"输出=输入"（就地覆盖，或同名文件），
         // 直写会一边读原文件一边截断它 —— 直接毁掉源文件。
@@ -850,7 +1338,15 @@ class AppController extends ChangeNotifier {
             final saved = await output.save(tmp, outName);
             job.outputPath = saved;
             job.status = JobStatus.saved;
-            job.message = '已保存：${job.outputPath}';
+            job.message = '已保存：$saved';
+            if (output.ledgerKind == 'dir') lastSavedPath = saved;
+            _recordRepair(
+              job: job,
+              outName: outName,
+              kind: output.ledgerKind,
+              ref: output.ledgerRef,
+              mode: source == JobSource.folder ? '文件夹批量' : '本地文件',
+            );
           }
         } catch (e) {
           job.status = (e is RepairCancelledException || task?.cancelled == true)
@@ -868,6 +1364,7 @@ class AppController extends ChangeNotifier {
       batchDone = 0;
       batchTotal = 0;
       notifyListeners();
+      await flushLedger();
     }
   }
 
@@ -898,3 +1395,6 @@ class AppController extends ChangeNotifier {
     }
   }
 }
+
+/// 小工具：条件成立时返回 [build] 的结果，否则 null。
+T? if_<T>(bool condition, T Function() build) => condition ? build() : null;

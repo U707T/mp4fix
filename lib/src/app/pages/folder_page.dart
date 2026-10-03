@@ -8,8 +8,15 @@ import '../widgets/job_tile.dart';
 import '../widgets/ui_kit.dart';
 
 /// 文件夹批量检测 / 修复（Android 走 SAF；桌面走普通目录）。
-class FolderPage extends StatelessWidget {
+class FolderPage extends StatefulWidget {
   const FolderPage({super.key});
+
+  @override
+  State<FolderPage> createState() => _FolderPageState();
+}
+
+class _FolderPageState extends State<FolderPage> {
+  JobFilter _filter = JobFilter.all;
 
   /// 清空 → 直接执行 + 撤销入口（不再弹确认框）。
   void _clearWithUndo(BuildContext context, AppController controller) {
@@ -28,12 +35,26 @@ class FolderPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final controller = AppScope.of(context);
-    final jobs = controller.jobsOf(JobSource.folder);
+    final all = controller.jobsOf(JobSource.folder);
+    final jobs =
+        all.where((j) => _filter.matches(j.status)).toList(growable: false);
     final busy = controller.runningSource == JobSource.folder;
     final canRun = !controller.running;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('文件夹批量')),
+      appBar: AppBar(
+        title: const Text('文件夹批量'),
+        actions: [
+          if (controller.canOpenOutputLocation)
+            IconButton(
+              tooltip: '打开输出文件夹',
+              icon: const Icon(Icons.folder_open_rounded),
+              onPressed: canRun
+                  ? () => guardUi(context, controller.openOutputLocation)
+                  : null,
+            ),
+        ],
+      ),
       body: ListView(
         padding: const EdgeInsets.only(top: 4, bottom: 4),
         children: [
@@ -142,21 +163,30 @@ class FolderPage extends StatelessWidget {
                 icon: const Icon(Icons.build_rounded),
                 label: const Text('扫描并修复'),
               ),
-              if (!busy && jobs.isNotEmpty)
+              if (!busy && all.isNotEmpty)
                 TextButton(
                   onPressed: () => _clearWithUndo(context, controller),
                   child: const Text('清空'),
                 ),
             ],
           ),
+          JobFilterBar(
+            jobs: all,
+            value: _filter,
+            onChanged: (f) => setState(() => _filter = f),
+          ),
           JobSummaryBar(
-            jobs: jobs,
+            jobs: all,
             active: busy ? controller.batchDone : null,
             total: busy ? controller.batchTotal : null,
             onFixAll: canRun && controller.hasFixable(JobSource.folder)
                 ? () => guardUi(
                     context, () => controller.fixJobs(JobSource.folder))
                 : null,
+            onProcessAll:
+                canRun && controller.processAllCount(JobSource.folder) > 0
+                    ? () => runProcessAll(context, controller, JobSource.folder)
+                    : null,
           ),
           if (controller.lastNotice != null)
             Padding(
@@ -169,13 +199,15 @@ class FolderPage extends StatelessWidget {
               ),
             ),
           if (jobs.isEmpty)
-            const Padding(
-              padding: EdgeInsets.only(top: 32),
+            Padding(
+              padding: const EdgeInsets.only(top: 32),
               child: EmptyHint(
                 icon: Icons.folder_copy_rounded,
-                title: '递归检测整个文件夹',
-                subtitle: '「仅扫描」只做体检；\n'
-                    '「扫描并修复」会把需重排的文件无损重排后写入输出位置。',
+                title: all.isEmpty ? '递归检测整个文件夹' : '这个筛选下没有任务',
+                subtitle: all.isEmpty
+                    ? '「仅扫描」只做体检；\n'
+                        '「扫描并修复」会把需重排的文件无损重排后写入输出位置。'
+                    : '点上方「全部」查看完整列表。',
               ),
             )
           else

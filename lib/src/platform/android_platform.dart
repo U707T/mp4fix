@@ -72,4 +72,33 @@ class AndroidPlatform {
       // 忽略
     }
   }
+
+  /// 指定 SAF 文件夹里是否已存在 [name]（修复记录校验用）。
+  ///
+  /// 查询失败时返回 true —— "不确定"就当作产物还在，不要平白让复用失效。
+  static Future<bool> existsInTree(String treeUri, String name) async {
+    try {
+      final result = await _channel.invokeMethod<bool>('existsInTree', {
+        'treeUri': treeUri,
+        'name': name,
+      });
+      return result ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// 公共「下载/MP4Fix」里是否已存在 [name]（修复记录校验用）。
+  ///
+  /// 查询失败时返回 true（同上）。
+  static Future<bool> existsInDownloads(String name) async {
+    try {
+      final result = await _channel.invokeMethod<bool>('existsInDownloads', {
+        'name': name,
+      });
+      return result ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
 }

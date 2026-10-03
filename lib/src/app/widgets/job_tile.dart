@@ -21,6 +21,8 @@ class JobTile extends StatelessWidget {
             status == JobStatus.failed ||
             status == JobStatus.cancelled) &&
         !controller.running;
+    // 已修复（复用上次结果）→ 可以「重做」（清掉记录重新检测 + 修复）
+    final canRedo = status == JobStatus.reused && !controller.running;
 
     return Card(
       elevation: 0,
@@ -90,15 +92,24 @@ class JobTile extends StatelessWidget {
                 ),
               ),
             ],
-            if (canRetry)
+            if (canRetry || canRedo)
               Align(
                 alignment: Alignment.centerRight,
                 child: TextButton.icon(
-                  onPressed: () => job.source == JobSource.webdav
-                      ? controller.fixWebDavJobs(only: [job])
-                      : controller.fixJobs(job.source, [job]),
-                  icon: const Icon(Icons.build_rounded, size: 18),
-                  label: Text(status.fixable ? '修复这条' : '重试'),
+                  onPressed: () => canRedo
+                      ? controller.redoJob(job)
+                      : (job.source == JobSource.webdav
+                          ? controller.fixWebDavJobs(only: [job])
+                          : controller.fixJobs(job.source, [job])),
+                  icon: Icon(
+                    canRedo ? Icons.refresh_rounded : Icons.build_rounded,
+                    size: 18,
+                  ),
+                  label: Text(
+                    canRedo
+                        ? '重做'
+                        : (status.fixable ? '修复这条' : '重试'),
+                  ),
                 ),
               ),
           ],
@@ -118,7 +129,7 @@ class StatusChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final (bg, fg) = switch (status) {
-      JobStatus.ok || JobStatus.saved || JobStatus.uploaded =>
+      JobStatus.ok || JobStatus.saved || JobStatus.uploaded || JobStatus.reused =>
         (scheme.primaryContainer, scheme.onPrimaryContainer),
       JobStatus.needsFix ||
       JobStatus.optimizable ||

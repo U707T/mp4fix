@@ -1,5 +1,6 @@
 package com.u707t.mp4fix
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.net.Uri
 import android.os.Build
@@ -75,6 +76,30 @@ class MainActivity : FlutterActivity() {
                 }
                 runCatching { DocumentsContract.deleteDocument(contentResolver, uri) }
                 result.success(null)
+            }
+
+            "existsInTree" -> {
+                val tree = call.argument<String>("treeUri")?.let(Uri::parse)
+                val name = call.argument<String>("name")
+                if (tree == null || name.isNullOrBlank()) {
+                    result.error("bad_args", "缺少参数", null)
+                    return
+                }
+                val exists = runCatching {
+                    findChild(tree, parentDocumentUri(tree), name) != null
+                }.getOrElse { true } // 查询失败当作"还在"，别平白让复用失效
+                result.success(exists)
+            }
+
+            "existsInDownloads" -> {
+                val name = call.argument<String>("name")
+                if (name.isNullOrBlank()) {
+                    result.error("bad_args", "缺少参数", null)
+                    return
+                }
+                val exists = runCatching { findDownload(name) != null }
+                    .getOrElse { true }
+                result.success(exists)
             }
 
             else -> result.notImplemented()
@@ -222,10 +247,25 @@ class MainActivity : FlutterActivity() {
     /**
      * 保存到公共「下载/MP4Fix」目录（Android 10+ 走 MediaStore，无需任何权限，用户可见）。
      * 低版本退回应用外部目录（同样不需要权限）。
+     *
+     * 同名时直接覆盖旧产物 —— 否则 MediaStore 会自动改名成 "xxx (1).mp4"，
+     * 反复修复同一部片子就会在下载目录里堆出一串副本。
      */
     private fun saveToDownloads(name: String, source: File): String {
         val resolver = contentResolver
         if (Build.VERSION.SDK_INT >= 29) {
+            val existing = findDownload(name)
+            if (existing != null) {
+                try {
+                    resolver.openOutputStream(existing, "wt")?.use { out ->
+                        source.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
+                    } ?: throw IOException("无法写入下载目录")
+                    return "下载/MP4Fix/$name"
+                } catch (e: Exception) {
+                    // 覆盖失败：删掉旧文件后走下面的新建流程
+                    runCatching { resolver.delete(existing, null, null) }
+                }
+            }
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
@@ -260,6 +300,39 @@ class MainActivity : FlutterActivity() {
             out.outputStream().buffered(1 shl 20).use { o -> input.copyTo(o, 1 shl 20) }
         }
         return out.absolutePath
+    }
+
+    /** 在「下载/MP4Fix」里找同名文件（Android 10+）。 */
+    private fun findDownload(name: String): Uri? {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.RELATIVE_PATH,
+            )
+            try {
+                contentResolver.query(
+                    collection,
+                    projection,
+                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ?",
+                    arrayOf(name),
+                    null,
+                )?.use { c ->
+                    val idCol = c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID)
+                    val pathCol = c.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                    while (c.moveToNext()) {
+                        val rel = if (pathCol >= 0) c.getString(pathCol) else null
+                        if (rel == null || !rel.contains("MP4Fix")) continue
+                        return ContentUris.withAppendedId(collection, c.getLong(idCol))
+                    }
+                }
+            } catch (e: Exception) {
+                return null
+            }
+            return null
+        }
+        val dir = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "MP4Fix")
+        return if (File(dir, name).exists()) Uri.fromFile(File(dir, name)) else null
     }
 
     // ---------------------------------------------------------------- 输入复制
