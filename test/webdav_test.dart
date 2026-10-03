@@ -43,6 +43,13 @@ void main() {
     if (cacheDir.existsSync()) cacheDir.deleteSync(recursive: true);
   });
 
+  /// 对整个 library 目录做一次扫描（阈值 20KB：小夹具也能拉开“需重排”）。
+  Future<List<ScanItem>> scanAll(TestDavServer s, WebDavClient c) =>
+      WebDavScanner(c, threshold: 20000).scan(
+        '${s.baseUrl}/library',
+        tempDir: cacheDir,
+      );
+
   // ---------------------------------------------------------------- 客户端
 
   test('list 返回解码后的条目名（含中文与空格）', () async {
@@ -121,6 +128,63 @@ void main() {
     expect(remote.faststart, local.faststart);
   });
 
+  test('分片 MP4：远程预取检测与本地一致，且可下载修复为健康文件', () async {
+    fixture('fragmented.mp4').copySync('${tmpRoot.path}/library/frag.mp4');
+    final url = '${server.baseUrl}/library/frag.mp4';
+    final size = fixture('fragmented.mp4').lengthSync();
+
+    // 远程预取（盒头 + moov + 各 moof）检测
+    final input = await prefetchForInspect(client, url, fileSize: size);
+    late final InspectReport remote;
+    try {
+      remote = Mp4Inspect.inspect(input, interleaveThresholdBytes: 20000);
+      expect(input.prefetchedBytes, lessThan(size), reason: '不应整档下载');
+    } finally {
+      input.close();
+    }
+
+    late final InspectReport local;
+    final localInput = FileSeekableInput(fixture('fragmented.mp4'));
+    try {
+      local = Mp4Inspect.inspect(localInput, interleaveThresholdBytes: 20000);
+    } finally {
+      localInput.close();
+    }
+
+    expect(remote.health, local.health);
+    expect(remote.videoSamples, local.videoSamples);
+    expect(remote.audioSamples, local.audioSamples);
+    expect(remote.interleaveMaxBytes, local.interleaveMaxBytes);
+    expect(remote.interleaveMeanBytes, local.interleaveMeanBytes);
+    expect(remote.faststart, local.faststart);
+    expect(remote.health, Mp4Health.needsReinterleave, reason: remote.detail);
+
+    // 扫描器同样能识别（走远程 Range 预取路径）
+    final frag =
+        (await scanAll(server, client)).firstWhere((it) => it.path == 'frag.mp4');
+    expect(frag.report, isNotNull, reason: frag.error);
+    expect(frag.report!.health, Mp4Health.needsReinterleave,
+        reason: frag.report!.detail);
+
+    // 下载到本地 → 无损扁平化 → 健康产物（服务器只读）
+    final fixer = WebDavFixer(client, cacheDir: cacheDir);
+    final out = File('${cacheDir.path}/frag-fixed.mp4');
+    final result = await fixer.fixToFile(frag, out);
+    expect(result.ok, isTrue, reason: result.message);
+
+    final fixedInput = FileSeekableInput(out);
+    try {
+      final report =
+          Mp4Inspect.inspect(fixedInput, interleaveThresholdBytes: 100000);
+      expect(report.health, Mp4Health.ok, reason: report.detail);
+      expect(report.faststart, isTrue);
+    } finally {
+      fixedInput.close();
+    }
+    expect(File('${tmpRoot.path}/library/frag_fixed.mp4').existsSync(), isFalse,
+        reason: '只读模式不应向服务器写入');
+  });
+
   test('Basic 认证：无凭据 401，有凭据可用', () async {
     final secured = await TestDavServer.start(tmpRoot, user: 'u', pass: 'p');
     try {
@@ -146,12 +210,6 @@ void main() {
   });
 
   // ---------------------------------------------------------------- 扫描
-
-  Future<List<ScanItem>> scanAll(TestDavServer s, WebDavClient c) =>
-      WebDavScanner(c, threshold: 20000).scan(
-        '${s.baseUrl}/library',
-        tempDir: cacheDir,
-      );
 
   test('扫描分类正确（含中文 / 空格路径）', () async {
     final items = await scanAll(server, client);

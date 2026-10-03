@@ -157,7 +157,8 @@ class _FolderPageState extends State<FolderPage> {
               dense: true,
               contentPadding: EdgeInsets.zero,
               title: const Text('同时处理「可优化」'),
-              subtitle: const Text('只缺 moov 前置的文件也一起处理（串流更顺）'),
+              subtitle: const Text(
+                  '只缺 moov 前置、或分片（fragmented）MP4 也一起处理（转换为标准 MP4，兼容性更好）'),
               value: controller.settings.includeOptimizable,
               onChanged: canRun
                   ? (v) =>

@@ -12,6 +12,7 @@ android/local.properties
 android/app/keystore.jks
 android/key.properties
 *.apk
+*.apk.idsig
 
 # 其他
 *.log

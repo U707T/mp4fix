@@ -11,7 +11,7 @@ class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
   /// 与 pubspec.yaml 的 version 保持一致。
-  static const String appVersion = '2.4.2';
+  static const String appVersion = '2.5.0';
 
   @override
   Widget build(BuildContext context) {
@@ -56,7 +56,8 @@ class SettingsPage extends StatelessWidget {
                 dense: true,
                 contentPadding: EdgeInsets.zero,
                 title: const Text('同时处理「可优化」'),
-                subtitle: const Text('只缺 moov 前置的文件也一起修复'),
+                subtitle: const Text(
+                    '只缺 moov 前置、或分片（fragmented）MP4 也一起修复（无损转换为标准 MP4）'),
                 value: settings.includeOptimizable,
                 onChanged: canEdit
                     ? (v) => controller
@@ -205,6 +206,8 @@ class SettingsPage extends StatelessWidget {
                         '甚至几百 MB（正常应 < 1MB），弱读取设备 / 流式播放就会卡顿。\n\n'
                         '修复方式：解析采样表 → 按时间重新切块并全局合并 → moov 前置 → '
                         '流式改写 mdat（样本字节原样拷贝，画质无损、不重新编码）。\n\n'
+                        '分片（fragmented）MP4 会先解析 moof 得到样本，'
+                        '再按同样方式无损转换为标准 MP4。\n\n'
                         '引擎为纯 Dart 实现，与 Kotlin 旧版逐字节一致；'
                         '仓库：github.com/U707T/mp4fix',
                       ),

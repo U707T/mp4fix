@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'binary.dart';
 import 'boxes.dart';
+import 'mp4_fragments.dart';
 import 'seekable_input.dart';
 
 /// MP4 健康状态。
@@ -12,10 +13,11 @@ enum Mp4Health {
   /// 交错被打乱：可用无损重排修复（不影响画质）。
   needsReinterleave,
 
-  /// 仅未 moov 前置：可正常播放，串流体验可优化（修复会顺带前置 moov）。
+  /// 可无损优化：缺 moov 前置（faststart），或分片（fragmented）MP4
+  /// （可无损转换为标准 MP4）。修复后串流 / 兼容性更好。
   optimizable,
 
-  /// 分片（fragmented）MP4 或非 MP4 文件：本工具暂不支持。
+  /// 其他暂不支持的文件（保留给以后可能出现的类型；分片 MP4 现已支持）。
   unsupported,
 
   /// 结构损坏 / 截断：无法无损修复。
@@ -60,11 +62,13 @@ class InspectReport {
 
 /// MP4 健康检测（供批量扫描 / WebDAV 扫描使用）。
 ///
-/// 只读取文件头部与 moov 盒（经由 [SeekableInput] 随机读取），无需完整下载：
+/// 只读取文件头部、moov 盒与分片 MP4 的 moof 盒（经由 [SeekableInput] 随机读取），
+/// 无需完整下载：
 ///  - 结构完整性：能否定位 moov、样本表是否自洽、样本是否越界（截断）、ctts 表是否可疑；
 ///  - 交错质量：同刻音视频数据在文件中的距离（距离过大 = 弱读取设备 / 流式播放易卡顿，
 ///    可用无损重排修复）；
-///  - 其他：是否 moov 前置（faststart）、是否分片（fragmented）MP4。
+///  - 其他：是否 moov 前置（faststart）、是否分片（fragmented）MP4
+///    （分片文件解析 moof/trun 后按同一套规则判定）。
 abstract final class Mp4Inspect {
   /// 交错距离默认阈值：≥ 4MB 视为需要重排。
   static const int defaultInterleaveThreshold = 4 * 1024 * 1024;
@@ -94,9 +98,6 @@ abstract final class Mp4Inspect {
     } catch (e) {
       return _corrupt(fileSize, '读取文件头部失败：${errorMessage(e)}');
     }
-    if (top.any((b) => b.type == 'moof')) {
-      return _unsupported(fileSize, '分片（fragmented）MP4 暂不支持');
-    }
     if (ftyp == null) {
       return _corrupt(fileSize, '未找到 ftyp 盒（非 MP4 文件？）');
     }
@@ -104,13 +105,23 @@ abstract final class Mp4Inspect {
       return _corrupt(fileSize, '未找到 moov 盒（文件损坏或非 MP4）');
     }
 
+    // ------------------------------------------------------------ 分片 MP4
+    // 带 moof（媒体分片）或 moov 带 mvex 的文件走分片检测：解析 trun 得到
+    // 样本信息，一样可以判定结构完整性 / 交错距离；修复时会无损转换为标准 MP4。
+    if (top.any((b) => b.type == 'moof') || _hasMvex(input, moov)) {
+      return _inspectFragmented(
+        input,
+        fileSize,
+        top,
+        moov,
+        interleaveThresholdBytes,
+      );
+    }
+
     // ------------------------------------------------------------ 轨道
     final tracks = <_TrackInfo>[];
     try {
       final moovChildren = readBoxes(input, moov.payloadStart, moov.end);
-      if (moovChildren.any((b) => b.type == 'mvex')) {
-        return _unsupported(fileSize, '分片（fragmented）MP4 暂不支持');
-      }
       var index = 0;
       for (final b in moovChildren) {
         if (b.type == 'trak') {
@@ -184,20 +195,151 @@ abstract final class Mp4Inspect {
     );
   }
 
+  /// moov 里是否有 `mvex`（分片标记）；读取失败时返回 false（交由常规路径报错）。
+  static bool _hasMvex(SeekableInput input, Box moov) {
+    try {
+      return readBoxes(input, moov.payloadStart, moov.end)
+          .any((b) => b.type == 'mvex');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 分片（fragmented）MP4 的检测：解析 moof/traf/trun 得到样本信息后，
+  /// 与普通 MP4 一样判定结构完整性 / 交错距离 / faststart。
+  ///
+  /// 分片 MP4 一律至少判为「可优化」——它可以无损转换为标准 MP4（兼容性更好）；
+  /// 交错距离超过阈值时判为「需重排」（转换时会重新排布）。
+  static InspectReport _inspectFragmented(
+    SeekableInput input,
+    int fileSize,
+    List<Box> top,
+    Box moov,
+    int interleaveThresholdBytes,
+  ) {
+    final List<Box> moovChildren;
+    final Map<int, FragmentTrackDefaults> trexDefaults;
+    final tracks = <_TrackInfo>[];
+    try {
+      moovChildren = readBoxes(input, moov.payloadStart, moov.end);
+      trexDefaults = parseTrexDefaults(input, moovChildren);
+      var index = 0;
+      for (final b in moovChildren) {
+        if (b.type == 'trak') {
+          tracks.add(_parseTrack(
+            input,
+            index++,
+            b,
+            fileSize,
+            allowEmptyTables: true,
+          ));
+        }
+      }
+    } catch (e) {
+      return _corrupt(fileSize, '结构损坏：${errorMessage(e)}');
+    }
+    if (tracks.isEmpty) {
+      return _corrupt(fileSize, '文件中没有媒体轨道');
+    }
+
+    final moofs = <Box>[
+      for (final b in top)
+        if (b.type == 'moof') b,
+    ];
+    if (moofs.isEmpty) {
+      return _corrupt(fileSize, '带分片标记（mvex），但没有找到媒体分片（moof）');
+    }
+
+    // 按 track_ID 收集分片样本
+    final fragTracks = <int, FragmentTrackSamples>{};
+    for (final t in tracks) {
+      final id = t.trackId;
+      if (id != null && !fragTracks.containsKey(id)) {
+        fragTracks[id] = FragmentTrackSamples(id);
+      }
+    }
+    try {
+      readFragmentSamples(input, moofs, fragTracks, defaults: trexDefaults);
+    } catch (e) {
+      return _corrupt(fileSize, '分片解析失败：${errorMessage(e)}');
+    }
+
+    // 取每条轨道的样本信息（首条视频 / 首条音频参与交错距离）
+    // 混合文件（moov 采样表非空 + 分片）时，两部分样本合并参与判定。
+    _TrackInfo? video;
+    _TrackInfo? audio;
+    for (final t in tracks) {
+      final frag = t.trackId == null ? null : fragTracks[t.trackId];
+      if (frag == null || frag.count == 0) continue;
+      final classicDts = t.dts ?? const <int>[];
+      final classicOff = t.offsets ?? const <int>[];
+      if (classicDts.isEmpty) {
+        t.samples = frag.count;
+        t.dts = frag.dts;
+        t.offsets = frag.offsets;
+      } else {
+        t.samples = classicDts.length + frag.count;
+        t.dts = [...classicDts, ...frag.dts];
+        t.offsets = [...classicOff, ...frag.offsets];
+      }
+      if (video == null && t.isVideo) video = t;
+      if (audio == null && t.isAudio) audio = t;
+    }
+    if (video == null && audio == null) {
+      return _corrupt(fileSize, '分片 MP4 中没有可读取的媒体样本');
+    }
+
+    var maxDist = 0;
+    var meanDist = 0;
+    if (video != null && audio != null) {
+      final d = _interleaveDistance(video, audio);
+      maxDist = d.max;
+      meanDist = d.mean;
+    }
+
+    final faststart = moov.start < moofs.first.start;
+    final note = StringBuffer('分片（fragmented）MP4（${moofs.length} 个分片）');
+    if (video != null && audio != null) {
+      note.write(
+        ' · 同刻音视频距离：最大 ${formatBytes(maxDist)}、'
+        '平均 ${formatBytes(meanDist)}',
+      );
+    } else {
+      note.write(' · 单轨文件');
+    }
+    if (!faststart) note.write('；moov 未前置（faststart）');
+
+    final Mp4Health health;
+    if (video != null && audio != null && maxDist >= interleaveThresholdBytes) {
+      health = Mp4Health.needsReinterleave;
+    } else {
+      health = Mp4Health.optimizable;
+    }
+
+    final String detail;
+    switch (health) {
+      case Mp4Health.needsReinterleave:
+        detail = '$note（判定阈值 ${formatBytes(interleaveThresholdBytes)}：'
+            '最大距离超过它即视为交错不良；将无损转换为标准 MP4 并重排音视频）';
+      default:
+        detail = '$note（可无损转换为标准 MP4，兼容性更好）';
+    }
+
+    return InspectReport(
+      health: health,
+      detail: detail,
+      fileSize: fileSize,
+      trackCount: tracks.length,
+      videoSamples: video?.samples ?? 0,
+      audioSamples: audio?.samples ?? 0,
+      interleaveMaxBytes: maxDist,
+      interleaveMeanBytes: meanDist,
+      faststart: faststart,
+    );
+  }
+
   static InspectReport _corrupt(int size, String message) => InspectReport(
         health: Mp4Health.corrupt,
-        detail: message,
-        fileSize: size,
-        trackCount: 0,
-        videoSamples: 0,
-        audioSamples: 0,
-        interleaveMaxBytes: 0,
-        interleaveMeanBytes: 0,
-        faststart: false,
-      );
-
-  static InspectReport _unsupported(int size, String message) => InspectReport(
-        health: Mp4Health.unsupported,
         detail: message,
         fileSize: size,
         trackCount: 0,
@@ -281,10 +423,24 @@ abstract final class Mp4Inspect {
     SeekableInput input,
     int index,
     Box trak,
-    int fileSize,
-  ) {
+    int fileSize, {
+    bool allowEmptyTables = false,
+  }) {
     final t = _TrackInfo(index);
     final trakChildren = readBoxes(input, trak.payloadStart, trak.end);
+
+    // tkhd：track_ID（分片按 track_ID 索引）
+    final tkhd = _firstOf(trakChildren, 'tkhd');
+    if (tkhd != null) {
+      final tr = readBytes(input, tkhd.start, tkhd.size < 32 ? tkhd.size : 32);
+      if (tr.length >= 24) {
+        // v0: track_ID@20(32)；v1: creation/modification 各 64 位，track_ID@28
+        t.trackId = tr[8] == 1
+            ? (tr.length >= 32 ? u32(tr, 28) : null)
+            : u32(tr, 20);
+      }
+    }
+
     final mdia = _firstOf(trakChildren, 'mdia');
     if (mdia == null) throw RepairException('trak 缺少 mdia 盒');
     final mdiaChildren = readBoxes(input, mdia.payloadStart, mdia.end);
@@ -313,7 +469,7 @@ abstract final class Mp4Inspect {
     final stbl = _firstOf(minfChildren, 'stbl');
     if (stbl == null) throw RepairException('minf 缺少 stbl 盒');
 
-    _parseStbl(input, t, stbl, fileSize);
+    _parseStbl(input, t, stbl, fileSize, allowEmptyTables: allowEmptyTables);
     return t;
   }
 
@@ -321,9 +477,27 @@ abstract final class Mp4Inspect {
     SeekableInput input,
     _TrackInfo t,
     Box stbl,
-    int fileSize,
-  ) {
+    int fileSize, {
+    bool allowEmptyTables = false,
+  }) {
     final children = readBoxes(input, stbl.payloadStart, stbl.end);
+
+    // 分片 MP4 的 moov 采样表通常为空（empty_moov）：stsz 缺省或 0 个样本 →
+    // 视为没有「普通样本」，样本以 moof 为准（由分片路径填充）。
+    if (allowEmptyTables) {
+      final stszBox = _firstOf(children, 'stsz');
+      var empty = stszBox == null;
+      if (!empty) {
+        final szRaw = readBytes(input, stszBox.start, stszBox.size);
+        empty = szRaw.length < 20 || u32(szRaw, 16) == 0;
+      }
+      if (empty) {
+        t.samples = 0;
+        t.dts = const [];
+        t.offsets = const [];
+        return;
+      }
+    }
 
     List<int>? sizes;
     List<List<int>>? stsc;
@@ -495,6 +669,9 @@ class _TrackInfo {
   _TrackInfo(this.index);
 
   final int index;
+
+  /// tkhd 里的 track_ID（分片路径用来关联 moof/traf）。
+  int? trackId;
   int timescale = 0;
   bool isVideo = false;
   bool isAudio = false;

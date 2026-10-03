@@ -10,7 +10,9 @@ import 'package:mp4fix/src/engine/engine.dart';
 ///   - 修复 `Mp4Repair.repair` 只能抛 [RepairException]（不能是 RangeError / OOM 等 Error）；
 ///   - 不得出现超大内存分配（表长度自洽校验的回归保护）。
 void main() {
-  final base = File('test/fixtures/good.mp4');
+  // 普通文件与分片（fragmented）文件都做一轮：分片解析是新增路径，重点覆盖。
+  for (final name in ['good.mp4', 'fragmented.mp4']) {
+  final base = File('test/fixtures/$name');
 
   void check(Uint8List bytes, String label) {
     // 1) 检测：必须返回报告
@@ -41,7 +43,7 @@ void main() {
     }
   }
 
-  test('随机字节破坏 ×120（固定种子）', () {
+  test('[$name] 随机字节破坏 ×120（固定种子）', () {
     final random = Random(20260927);
     final original = base.readAsBytesSync();
     for (var i = 0; i < 120; i++) {
@@ -58,7 +60,7 @@ void main() {
     }
   });
 
-  test('随机截断 ×60（固定种子）', () {
+  test('[$name] 随机截断 ×60（固定种子）', () {
     final random = Random(4242);
     final original = base.readAsBytesSync();
     for (var i = 0; i < 60; i++) {
@@ -67,7 +69,7 @@ void main() {
     }
   });
 
-  test('纯随机数据 ×30（固定种子）', () {
+  test('[$name] 纯随机数据 ×30（固定种子）', () {
     final random = Random(777);
     for (var i = 0; i < 30; i++) {
       final len = 16 + random.nextInt(20000);
@@ -78,4 +80,5 @@ void main() {
       check(bytes, '随机#$i');
     }
   });
+  }
 }

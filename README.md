@@ -9,6 +9,7 @@ UI 按 Material 3 重构，WebDAV / SAF / 权限等平台能力按 **Android 优
 
 Windows 端支持**把视频 / 文件夹直接拖进窗口**（也可以把文件拖到 `mp4fix.exe` 图标上打开）；
 修过的文件会记进「修复记录」，下次扫描直接标「已修复」跳过，不重复干活。
+分片（fragmented）MP4（含 `moof/mvex` 的录制文件）也能识别，并可**无损转换为标准 MP4**。
 
 ## 下载安装
 
@@ -31,21 +32,23 @@ Windows 端支持**把视频 / 文件夹直接拖进窗口**（也可以把文�
 |---|---|
 | **本地文件** | 多选 MP4 / M4V / MOV 或 **拖入窗口**（Windows）→ 自动检测 → 一键修复（原文件不动；**默认存到「下载/MP4Fix」**）；顶部可按 **全部 / 待处理 / 待优化 / 正常 / 问题 / 已完成** 筛选；「全部处理」连正常文件一起重排 |
 | **文件夹批量** | 递归扫描整个文件夹（Android 走 SAF），只体检或「扫描并修复」；输出文件夹可选成输入文件夹实现就地覆盖；已修过的文件会标「已修复」跳过 |
-| **WebDAV** | 填主机/端口/路径/账号 → 测试连接 → 扫描（**只读 moov，不整档下载**）→ 「上传副本」或「保存到本地（服务器全程只读）」 |
+| **WebDAV** | 填主机/端口/路径/账号 → 测试连接 → 扫描（**只读盒头 / moov / moof，不整档下载**）→ 「上传副本」或「保存到本地（服务器全程只读）」 |
 | **设置** | 判定阈值 1/2/4/8 MB、含「可优化」、输出文件夹、**文件命名规则**（原名 / 加前缀 / 加后缀）、**修复记录**开关与清空、主题、清理缓存、关于 |
 
-检测结果：**正常 / 需重排 / 可优化（缺 moov 前置）/ 损坏 / 不支持（分片） / 已修复（复用上次结果）**，阈值可调
-（几十~几百 MB 的交错距离才是卡顿元凶）。
+检测结果：**正常 / 需重排 / 可优化（缺 moov 前置 / 分片 MP4）/ 损坏 / 已修复（复用上次结果）**，阈值可调
+（几十~几百 MB 的交错距离才是卡顿元凶；分片 MP4 会按同一套规则判定，修复时无损转换为标准 MP4）。
 
 ## 修复原理（不重新编码、画质无损）
 
+0. 分片（fragmented）MP4：先解析 `moof/traf/trun` 汇总样本（大小 / 时长 / 时间戳 / 关键帧），
+   再按下面步骤无损“扁平化”为标准 MP4（去掉 `mvex` 与分片结构，必要时补全时长 / 用 `elst` 保留同步）；
 1. 解析 MP4 采样表（stts/stsc/stsz/stco 等），得到每个音/视频样本的偏移、大小、时间戳；
 2. 按时间重新切块（目标 ~0.5s 一块、块上限 2MB）并全局合并，把同一时刻的音视频数据写到一起；
 3. moov 前置（faststart）、丢弃无用元数据与尾部垃圾；
 4. 流式改写 mdat（样本字节原样拷贝，字节级一致）。
 
-**与 Kotlin 旧版逐字节一致**：`test/kotlin_parity_test.dart` 用 Kotlin CLI 的产物做金标准，
-Dart 引擎输出必须完全相同，杜绝算法漂移。
+**与 Kotlin 旧版逐字节一致**（非分片路径）：`test/kotlin_parity_test.dart` 用 Kotlin CLI 的产物做金标准，
+Dart 引擎输出必须完全相同，杜绝算法漂移；分片转换为新增能力（Kotlin 旧版无对应）。
 
 ## 架构
 
@@ -55,10 +58,11 @@ lib/src/engine/     纯 Dart 无损修复引擎（零 Flutter 依赖）
   binary.dart           异常、无符号读写、同步输出汇（SyncSink）
   boxes.dart            MP4 盒子扫描
   mp4_inspect.dart      MP4 健康检测（结构 / 交错距离 / faststart / 分片识别）
-  mp4_repair.dart       无损重排修复引擎
+  mp4_fragments.dart    分片（fragmented）MP4 解析：moof/traf/trun → 样本表
+  mp4_repair.dart       无损重排修复引擎（含分片 → 标准 MP4 的扁平化转换）
 lib/src/webdav/     WebDAV 扫描 / 修复流水线（纯 Dart：dart:io HttpClient + xml）
   webdav_client.dart    PROPFIND / GET(+Range) / PUT / DELETE / MOVE、Basic 认证、重定向、完整性校验
-  prefetch.dart         只预取「盒头 + moov」→ 同步引擎可直接检测远程文件
+  prefetch.dart         预取「盒头 + moov + 各 moof」→ 同步引擎可直接检测远程文件
   webdav_scanner.dart   递归扫描 + 健康分类（不支持 Range 自动降级整档下载）
   webdav_fixer.dart     下载 → 无损重排 → 上传副本 / 保存本地（含唯一命名与大小校验）
 lib/src/app/        Material 3 界面（AppController + InheritedNotifier，无额外状态库）
@@ -76,7 +80,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 - **SAF 写入的数据安全**：`name.mp4fix-part` → 校验大小 → **同名旧文件改名为 `.mp4fix-bak` 让位**
   （而不是先删）→ 改名转正 → 清理备份；任一步失败都会还原旧文件，消除「旧文件已删、新文件没写成」的窗口。
 
-## 测试（79 项，`flutter test`）
+## 测试（91 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -85,9 +89,10 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 | `kotlin_parity_test.dart` | **与 Kotlin 旧引擎逐字节对齐**（金标准） |
 | `lossless_test.dart` | **无损不变量**：独立实现的解析器逐样本比对 大小 / 时间戳 / 描述 / **载荷字节** |
 | `mp4_hardening_test.dart` | 损坏的采样表计数不再触发超大分配（防 OOM 回归） |
-| `robustness_fuzz_test.dart` | 模糊测试：210 次随机字节破坏 / 截断 / 纯随机数据，检测不抛异常、修复只抛可捕获异常 |
+| `robustness_fuzz_test.dart` | 模糊测试：普通 + 分片夹具各 210 次随机字节破坏 / 截断 / 随机数据，检测不抛异常、修复只抛可捕获异常 |
 | `engine_edge_test.dart` | moov 后置（可优化 → 修复后 faststart）、co64 64 位偏移表 |
-| `webdav_test.dart` | WebDAV 端到端 12 项（中文/空格路径、Range 降级、认证、取消、产物字节校验…） |
+| `fragmented_test.dart` | **分片 MP4**：检测分类 / 无损扁平化（逐样本比对，含 moov 表 + 分片混合写法）/ 距离改进 / 取消 / 截断 |
+| `webdav_test.dart` | WebDAV 端到端 13 项（中文/空格路径、Range 降级、认证、取消、分片 MP4 远程检测与修复、产物字节校验…） |
 | `webdav_util_test.dart` | URL 工具 + **服务端提前断开时识别"下载不完整"** |
 | `output_target_test.dart` | 落位安全：同名覆盖 / **失败还原旧文件** / 自动建目录 / 记录用位置信息 |
 | `name_rule_test.dart` | 命名规则：原名 / 前缀 / 后缀 / 非法字符 / 设置往返 |
@@ -96,7 +101,8 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 | `folder_scan_test.dart` | 目录列举：只挑视频、跳过隐藏目录、容忍无权限子目录 |
 | `error_message_test.dart` · `settings_test.dart` | 错误文案映射 · 设置 JSON 往返 |
 
-额外夹具由 `tool/make_extra_fixtures.py` 生成（`moov_last.mp4` / `co64.mp4`）。
+额外夹具由 `tool/make_extra_fixtures.py` 生成（`moov_last.mp4` / `co64.mp4`）；
+分片夹具由 `tool/make_fragmented_fixture.py` 生成（`fragmented.mp4` / `fragmented_hybrid.mp4` / `fragmented_bad.mp4`）。
 
 ## 开发
 
@@ -105,7 +111,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（25 项：引擎 10 + 金标准对齐 3 + WebDAV 12）
+flutter test                     # 全部测试（91 项：引擎 / 无损 / 金标准 / 分片 / WebDAV …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -120,8 +126,20 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 79 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 91 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.5.0 · 分片（fragmented）MP4 支持）
+
+- **检测：分片 MP4 不再“不支持”** —— 解析 `moof/traf/trun` 得到样本后按同一套规则判定：
+  交错距离 ≥ 阈值 →「需重排」，否则 →「可优化」（列表里显示分片数量与距离指标）；
+- **修复：无损“扁平化”为标准 MP4** —— 汇总分片样本 → 重建采样表（stts/stsc/stsz/stco/stss/ctts）→
+  去掉 `mvex` / 分片结构 → moov 前置 → 按时间重排音视频（样本字节原样拷贝、画质无损；
+  补全 mvhd/mdhd/tkhd 时长，tfdt 起点不一致时用 `elst` 空编辑保留同步）；
+- **WebDAV 远程扫描**：预取范围加上每个 `moof`（通常仅几 KB），仍不整档下载；
+- **测试**：新增 3 个夹具 —— `fragmented.mp4`（ffmpeg empty_moov）、`fragmented_hybrid.mp4`
+  （moov 采样表 + 分片混合）、`fragmented_bad.mp4`（视频 / 音频分居两端的“交错极差”重打包版）
+  + 9 项新测试；其中逐样本比对（大小 / 时间戳 / 描述索引 / 同步标记 / 载荷字节）保证转换无损。
 
 ## 本版要点（v2.4.2 · 全量代码审查 / 平台适配）
 
@@ -197,7 +215,8 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 
 ## 限制
 
-- 不支持 fragmented MP4（含 moof/mvex）与加密文件；
+- 加密（encrypted）MP4 暂不支持；分片（fragmented）MP4 现支持无损转换为标准 MP4；
+- 异常 / 截断的分片结构（如 trun 缺时长、样本越界）会判为「损坏」，无法转换；
 - 输出总大小超过 4 GB 的文件暂不支持；
 - WebDAV 认证仅支持 HTTP Basic；
 - Android 端若输入来源不支持随机读取（少数网盘类 provider），会先复制到应用缓存再处理（需要临时空间）；
