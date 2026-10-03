@@ -280,38 +280,39 @@ class JobSummaryBar extends StatelessWidget {
             ),
             const SizedBox(height: 6),
           ],
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  parts.join(' · '),
-                  style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
-                ),
-              ),
-              if (onProcessAll != null) ...[
-                const SizedBox(width: Insets.gap),
-                TextButton.icon(
-                  style: TextButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  onPressed: onProcessAll,
-                  icon: const Icon(Icons.layers_rounded, size: 18),
-                  label: const Text('全部处理'),
-                ),
-              ],
-              if (onFixAll != null && fixableCount > 0) ...[
-                const SizedBox(width: Insets.gap),
-                FilledButton.tonalIcon(
-                  style: FilledButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  onPressed: onFixAll,
-                  icon: const Icon(Icons.build_rounded, size: 18),
-                  label: Text('修复 $fixableCount 项'),
-                ),
-              ],
-            ],
+          Text(
+            parts.join(' · '),
+            style: text.bodySmall?.copyWith(color: scheme.onSurfaceVariant),
           ),
+          if (onProcessAll != null || (onFixAll != null && fixableCount > 0))
+            // 按钮单独一行右对齐：窄屏 / 大字号下自动换行，而不是把摘要挤爆
+            Align(
+              alignment: Alignment.centerRight,
+              child: Wrap(
+                spacing: Insets.gap,
+                runSpacing: Insets.gap / 2,
+                children: [
+                  if (onProcessAll != null)
+                    TextButton.icon(
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      onPressed: onProcessAll,
+                      icon: const Icon(Icons.layers_rounded, size: 18),
+                      label: const Text('全部处理'),
+                    ),
+                  if (onFixAll != null && fixableCount > 0)
+                    FilledButton.tonalIcon(
+                      style: FilledButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                      ),
+                      onPressed: onFixAll,
+                      icon: const Icon(Icons.build_rounded, size: 18),
+                      label: Text('修复 $fixableCount 项'),
+                    ),
+                ],
+              ),
+            ),
         ],
       ),
     );

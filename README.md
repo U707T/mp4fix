@@ -123,7 +123,12 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 2. push 到 `main` → CI 自动：`test`（analyze + 79 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
 
-## 本版要点（v2.4.0）
+## 本版要点（v2.4.1）
+
+- 修复「汇总条」按钮行在窄屏 / 大字号下可能溢出的隐患：一键操作单独一行、右对齐并可自动换行；
+- 本地文件页在桌面端会显示完整路径（同名文件在不同文件夹时一眼可分）。
+
+### v2.4.0
 
 - **Windows 拖入**：整个窗口都是拖放区，把视频 / 文件夹拖进来即导入「本地文件」并自动体检；
   也支持把文件拖到 `mp4fix.exe` 上（命令行参数）打开；
