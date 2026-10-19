@@ -223,6 +223,44 @@ class AppController extends ChangeNotifier {
 
   int get ledgerLength => ledger.length;
 
+  // ---------------------------------------------------------------- 残留恢复
+
+  /// 扫描输入文件夹，找出「只剩 `.mp4fix-bak`」的残留（v2.7.0 及以前的事故现场）。
+  Future<List<BackupLeftover>> findBackupLeftovers() async {
+    if (!AndroidPlatform.isSupported) return const [];
+    final tree = settings.scanInputTreeUri;
+    if (tree == null || tree.isEmpty) {
+      throw StateError('请先在「文件夹」页选择要检查的文件夹');
+    }
+    return AndroidPlatform.listBackupLeftovers(tree);
+  }
+
+  /// 把残留的 `.mp4fix-bak` 改回正式名，返回成功数量。
+  Future<int> restoreBackupLeftovers(List<BackupLeftover> items) async {
+    if (!AndroidPlatform.isSupported || items.isEmpty) return 0;
+    final tree = settings.scanInputTreeUri;
+    if (tree == null || tree.isEmpty) return 0;
+    var ok = 0;
+    for (final it in items) {
+      final done = await AndroidPlatform.restoreBackup(
+        treeUri: tree,
+        backupName: it.backupName,
+      );
+      if (done) {
+        ok++;
+        // 恢复出来的文件不再算「已修复」，让下次扫描重新检测
+        ledger.remove(
+          ledgerKeyFile(name: it.originalName, size: it.size, modifiedMs: 0),
+        );
+      }
+    }
+    if (ok > 0) {
+      _scheduleLedgerSave();
+      notifyListeners();
+    }
+    return ok;
+  }
+
   /// 收集诊断信息（路径 / 是否存在 / 平台），便于远程排查。
   Future<String> collectDiagnostics() async {
     final lines = <String>[

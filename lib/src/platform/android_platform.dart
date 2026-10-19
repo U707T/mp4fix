@@ -11,6 +11,29 @@ class SafNotSeekableException implements Exception {
   String toString() => '来源不支持随机读取（已退回复制到缓存）';
 }
 
+/// 一个「只剩 `.mp4fix-bak`」的残留文件（v2.7.0 及以前 SAF 落位缺陷的现场）。
+///
+/// [originalName] 是它本该叫的名字；[size] 就是原视频的大小 —— 数据没丢，
+/// 改回名字即可恢复。
+class BackupLeftover {
+  const BackupLeftover({
+    required this.backupName,
+    required this.originalName,
+    required this.size,
+    required this.parentPath,
+  });
+
+  final String backupName;
+  final String originalName;
+  final int size;
+
+  /// 相对扫描根目录的展示路径（空字符串表示根目录）。
+  final String parentPath;
+
+  String get displayPath =>
+      parentPath.isEmpty ? originalName : '$parentPath/$originalName';
+}
+
 /// Android 平台通道（`mp4fix/platform`）。
 ///
 /// 只补足插件做不到的能力：
@@ -129,6 +152,55 @@ class AndroidPlatform {
       return result ?? true;
     } catch (_) {
       return true;
+    }
+  }
+
+  /// 扫描 SAF 文件夹，找出「只剩 `.mp4fix-bak`、正式名不见了」的残留文件。
+  ///
+  /// 这是 v2.7.0 及以前 SAF 落位缺陷的事故现场：原文件被改名让位后新文件没就位，
+  /// 原视频只剩一个 `.mp4fix-bak`。**数据没丢**，改回名字即可恢复。
+  static Future<List<BackupLeftover>> listBackupLeftovers(String treeUri) async {
+    try {
+      final raw = await _channel.invokeListMethod<Map<Object?, Object?>>(
+        'listBackupLeftovers',
+        {'treeUri': treeUri},
+      );
+      if (raw == null) return const [];
+      final out = <BackupLeftover>[];
+      for (final item in raw) {
+        final backupName = item['backupName'] as String?;
+        final originalName = item['originalName'] as String?;
+        if (backupName == null || originalName == null) continue;
+        out.add(
+          BackupLeftover(
+            backupName: backupName,
+            originalName: originalName,
+            size: (item['size'] as num?)?.toInt() ?? -1,
+            parentPath: item['parentPath'] as String? ?? '',
+          ),
+        );
+      }
+      return out;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// 把一个 `.mp4fix-bak` 改回正式名。返回是否成功。
+  ///
+  /// 正式名已存在时不覆盖（返回 false），避免又造出新的数据问题。
+  static Future<bool> restoreBackup({
+    required String treeUri,
+    required String backupName,
+  }) async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('restoreBackup', {
+        'treeUri': treeUri,
+        'backupName': backupName,
+      });
+      return ok ?? false;
+    } catch (_) {
+      return false;
     }
   }
 

@@ -80,7 +80,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 - **SAF 写入的数据安全**：`name.mp4fix-part` → 校验大小 → **同名旧文件改名为 `.mp4fix-bak` 让位**
   （而不是先删）→ 改名转正 → 清理备份；任一步失败都会还原旧文件，消除「旧文件已删、新文件没写成」的窗口。
 
-## 测试（131 项，`flutter test`）
+## 测试（134 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -112,7 +112,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（131 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
+flutter test                     # 全部测试（134 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -127,8 +127,39 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 131 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 134 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.7.1 · 🔴 紧急修复：SAF 落位把原文件变成 `.mp4fix-bak`）
+
+**事故现象**：修复完成后，文件夹里的原视频消失，只剩一堆 `185体育.mp4.mp4fix-bak`、
+`3人行s.mp4.mp4fix-bak`…… 大小与原文件完全一致。
+
+**根因**（`MainActivity.writeToTree()`）：原文件被改名让位成 `.bak` 后，
+`.part → 正式名` 这一步在部分 SAF 提供方（百度网盘、国产 ROM 文件管理器）上
+**「返回成功但实际没改名」**。旧代码只信 `renameDocument` 的返回值、不做复核，
+于是继续往下走，最终把备份也清掉（或还原失败）—— 正式名永久消失。
+
+**修复（顺序 + 复核 + 还原）**：
+1. 写 `.part` → 校验大小（这一步原文件完全没被碰过）；
+2. 原文件改名 `.bak`，**改名后必须 `findChild` 复核**；复核不到就中止，原文件不动；
+3. `.part → 正式名`，**不信返回值，一律用 `findChild` 复核**；
+4. 任何一步失败 → `restoreBackup()` 把 `.bak` 改回正式名；
+5. 只有确认正式名已就位，才删 `.bak`；
+6. 极端情况（正式名仍缺失）→ **保留 `.bak` 绝不删除**，宁可留一个可手动改回的文件。
+
+**新增：一键恢复残留**
+设置 → 维护 → **「恢复 .mp4fix-bak 残留」**：扫描所选文件夹，列出所有
+「只剩 `.mp4fix-bak`」的文件（显示原文件名与大小），确认后批量改回原名。
+**你的数据没有丢**，只是名字被改了。
+
+> 如果你已经被这个缺陷影响：更新到 v2.7.1 → 设置页点「恢复 .mp4fix-bak 残留」
+> → 选中原文件夹 → 确认。恢复后原视频照常播放，再重新修复一次即可。
+
+### 测试
+
+- 131 → 134 项。新增 `backup_restore_test.dart`，把「失败必须还原」
+  与「绝不出现只有 .bak 没有正式名的终态」钉成断言。
 
 ## 本版要点（v2.7.0 · 覆盖安全 / 路径修正 / 重复工作 / 图标重绘）
 

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../../engine/engine.dart';
 import '../app_scope.dart';
 import '../models.dart';
 import '../ui.dart';
@@ -11,7 +12,7 @@ class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
   /// 与 pubspec.yaml 的 version 保持一致。
-  static const String appVersion = '2.7.0';
+  static const String appVersion = '2.7.1';
 
   @override
   Widget build(BuildContext context) {
@@ -200,6 +201,80 @@ class SettingsPage extends StatelessWidget {
                           const SnackBar(content: Text('已清理临时文件')),
                         );
                       })
+                    : null,
+              ),
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('恢复 .mp4fix-bak 残留'),
+                subtitle: const Text(
+                    '扫描所选文件夹，把「只剩 .mp4fix-bak」的文件改回原名（数据没丢）'),
+                trailing: const Icon(Icons.healing_rounded),
+                onTap: canEdit
+                    ? () => guardUi(context, () async {
+                          final leftovers =
+                              await controller.findBackupLeftovers();
+                          if (!context.mounted) return;
+                          if (leftovers.isEmpty) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('没有发现需要恢复的残留文件'),
+                              ),
+                            );
+                            return;
+                          }
+                          final total = leftovers.fold<int>(
+                            0,
+                            (s, e) => s + (e.size > 0 ? e.size : 0),
+                          );
+                          final confirmed = await showDialog<bool>(
+                            context: context,
+                            builder: (ctx) => AlertDialog(
+                              title: Text('发现 ${leftovers.length} 个可恢复文件'),
+                              content: SingleChildScrollView(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Text(
+                                      '这些文件的原视频还在，只是名字变成了 '
+                                      '`.mp4fix-bak`（共 ${formatBytes(total)}）。'
+                                      '恢复 = 把名字改回去，不改动内容。',
+                                    ),
+                                    const SizedBox(height: 12),
+                                    for (final e in leftovers.take(20))
+                                      Text(
+                                        '· ${e.displayPath}',
+                                        style: Theme.of(ctx).textTheme.bodySmall,
+                                      ),
+                                    if (leftovers.length > 20)
+                                      Text('…等 ${leftovers.length} 个'),
+                                  ],
+                                ),
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () =>
+                                      Navigator.of(ctx).pop(false),
+                                  child: const Text('取消'),
+                                ),
+                                FilledButton(
+                                  onPressed: () => Navigator.of(ctx).pop(true),
+                                  child: const Text('恢复'),
+                                ),
+                              ],
+                            ),
+                          );
+                          if (confirmed != true) return;
+                          final ok =
+                              await controller.restoreBackupLeftovers(leftovers);
+                          if (!context.mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('已恢复 $ok / ${leftovers.length} 个文件'),
+                            ),
+                          );
+                        })
                     : null,
               ),
               ListTile(

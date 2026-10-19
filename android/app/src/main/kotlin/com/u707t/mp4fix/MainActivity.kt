@@ -120,6 +120,28 @@ class MainActivity : FlutterActivity() {
                 result.success(null)
             }
 
+            // 扫描整个 SAF 文件夹，找出「只剩 .mp4fix-bak、正式名不见了」的残留
+            // （v2.7.0 及以前的事故现场），返回可恢复清单。
+            "listBackupLeftovers" -> {
+                val tree = call.argument<String>("treeUri")?.let(Uri::parse)
+                if (tree == null) {
+                    result.error("bad_args", "缺少 treeUri", null)
+                    return
+                }
+                runInBackground(result) { listBackupLeftovers(tree) }
+            }
+
+            // 把某个 .mp4fix-bak 改回正式名（数据恢复）。
+            "restoreBackup" -> {
+                val tree = call.argument<String>("treeUri")?.let(Uri::parse)
+                val backupName = call.argument<String>("backupName")
+                if (tree == null || backupName.isNullOrBlank()) {
+                    result.error("bad_args", "缺少参数", null)
+                    return
+                }
+                runInBackground(result) { restoreBackupToOriginal(tree, backupName) }
+            }
+
             "existsInTree" -> {
                 val tree = call.argument<String>("treeUri")?.let(Uri::parse)
                 val name = call.argument<String>("name")
@@ -209,13 +231,36 @@ class MainActivity : FlutterActivity() {
 
     // ---------------------------------------------------------------- SAF 写入
 
+    /**
+     * 把 [source] 写进 SAF 文件夹 [tree]，覆盖同名文件 [name]。
+     *
+     * **不变式：任何失败路径下，用户的原文件都必须仍然可访问。**
+     *
+     * 历史事故（v2.7.0 及以前）：第 4 步 `renameDocument(partUri, name)` 在部分
+     * 提供方（百度网盘 / 各类国产 ROM 文件管理器）上会「返回成功但实际没改名」，
+     * 或改名成功但随后删除备份失败 —— 结果原文件永久停在 `xxx.mp4fix-bak`，
+     * 正式名消失，用户看到满目录 `.mp4fix-bak` 垃圾，原视频「不见了」。
+     *
+     * 现在的顺序（关键改动）：
+     *  1. 写 `.part` → 校验大小；
+     *  2. **先确认 .part 存在且完整**（这时还没碰原文件，最安全）；
+     *  3. 原文件改名 `.bak`（只让位，不删）；
+     *  4. `.part` 改名为正式名，并**用 findChild 复核结果**（不信返回值）；
+     *  5. 复核失败 → **无条件把 `.bak` 改回正式名**（这是还原的关键）；
+     *  6. 只有确认正式名已就位，才删 `.bak`。
+     *
+     * 另外：若正式名最终仍然缺失，`.bak` 一律保留（绝不删除），
+     * 宁可留一个 `.bak` 让用户手动改回，也不能让数据消失。
+     */
     private fun writeToTree(tree: Uri, name: String, source: File): Uri {
         val resolver = contentResolver
         val parent = parentDocumentUri(tree)
         val partName = "$name.mp4fix-part"
+        val backupName = "$name.mp4fix-bak"
 
-        // 1) 先写 .part（失败时清理半成品，别留垃圾）
-        val partUri = findChild(tree, parent, partName) ?: createDocument(tree, parent, partName)
+        // ---- 1) 写 .part（此时原文件还没被碰过，失败也不影响它）----
+        val partUri = findChild(tree, parent, partName)
+            ?: createDocument(tree, parent, partName)
         try {
             resolver.openOutputStream(partUri, "wt")?.use { out ->
                 source.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
@@ -225,65 +270,198 @@ class MainActivity : FlutterActivity() {
             throw e
         }
 
-        // 2) 校验落盘大小
+        // ---- 2) 校验 .part 落盘大小；不合格直接放弃，原文件毫发无伤 ----
         val written = source.length()
         val saved = documentSize(partUri)
         if (saved >= 0 && written > 0 && saved != written) {
             runCatching { DocumentsContract.deleteDocument(resolver, partUri) }
-            throw IOException("落盘校验失败（$saved ≠ $written 字节）")
+            throw IOException("落盘校验失败（$saved ≠ $written 字节），原文件未改动")
         }
 
-        // 3) 同名旧文件先"让位"改名为 .bak（失败才删；不直接删，留出还原余地）
+        // ---- 3) 原文件让位（改名 .bak；改名失败就保留原名，绝不删除）----
         var backupUri: Uri? = null
         val existing = findChild(tree, parent, name)
         if (existing != null) {
-            findChild(tree, parent, "$name.mp4fix-bak")?.let {
+            // 清掉上一次残留的 .bak（它已被本次的 .bak 取代）
+            findChild(tree, parent, backupName)?.let {
                 runCatching { DocumentsContract.deleteDocument(resolver, it) }
             }
-            val moved = runCatching {
-                DocumentsContract.renameDocument(resolver, existing, "$name.mp4fix-bak")
-            }.getOrNull() != null
-            if (moved) {
-                backupUri = existing
+            val renamed = runCatching {
+                DocumentsContract.renameDocument(resolver, existing, backupName)
+            }.getOrNull()
+            // 复核：改名后 .bak 必须真的能查到，才算让位成功
+            val backupNow = findChild(tree, parent, backupName)
+            if (renamed != null || backupNow != null) {
+                backupUri = backupNow ?: existing
             } else {
-                runCatching { DocumentsContract.deleteDocument(resolver, existing) }
+                // 改名失败：原文件仍在正式名下。此时**不能**删它，
+                // 也不能继续覆盖 —— 直接放弃，保住原文件。
+                runCatching { DocumentsContract.deleteDocument(resolver, partUri) }
+                throw IOException(
+                    "无法让位原文件（$name 改名失败），已中止，原文件未改动"
+                )
             }
         }
 
-        // 4) .part → 正式名；提供方不支持改名时退化为"复制到新文档"
-        val renamed = runCatching {
+        // ---- 4) .part → 正式名，并复核 ----
+        val renameOk = runCatching {
             DocumentsContract.renameDocument(resolver, partUri, name)
         }.getOrNull() != null
-        if (!renamed) {
-            // 创建正式文件失败：先把让位的旧文件还原回去，再报错
-            val target = try {
-                createDocument(tree, parent, name)
-            } catch (e: Exception) {
-                backupUri?.let {
-                    runCatching { DocumentsContract.renameDocument(resolver, it, name) }
-                }
-                throw e
+        var finalUri: Uri? = if (renameOk) findChild(tree, parent, name) else null
+
+        if (finalUri == null) {
+            // 改名不可用 / 没生效 → 退化为「新建正式文件 + 复制内容」
+            val target = runCatching { createDocument(tree, parent, name) }.getOrNull()
+            if (target == null) {
+                restoreBackup(resolver, tree, parent, backupUri, name)
+                runCatching { DocumentsContract.deleteDocument(resolver, partUri) }
+                throw IOException("无法创建正式文件 $name，已还原原文件")
             }
             try {
-                resolver.openInputStream(partUri)?.use { input ->
+                val copied = resolver.openInputStream(partUri)?.use { input ->
                     resolver.openOutputStream(target, "wt")?.use { out ->
                         input.copyTo(out, 1 shl 20)
-                    }
-                } ?: throw IOException("无法复制到新文件")
+                    } ?: throw IOException("无法写入新文件")
+                    true
+                } ?: throw IOException("无法读取临时文件")
+                if (!copied) throw IOException("复制未完成")
             } catch (e: Exception) {
                 runCatching { DocumentsContract.deleteDocument(resolver, target) }
-                backupUri?.let { runCatching { DocumentsContract.renameDocument(resolver, it, name) } }
+                restoreBackup(resolver, tree, parent, backupUri, name)
                 throw e
             }
+            // 复制完再复核一次大小，避免「文件建出来了但内容不全」
+            val copiedSize = documentSize(target)
+            if (written > 0 && copiedSize >= 0 && copiedSize != written) {
+                runCatching { DocumentsContract.deleteDocument(resolver, target) }
+                restoreBackup(resolver, tree, parent, backupUri, name)
+                throw IOException("新文件大小不符（$copiedSize ≠ $written），已还原原文件")
+            }
+            finalUri = target
             runCatching { DocumentsContract.deleteDocument(resolver, partUri) }
-            backupUri?.let { runCatching { DocumentsContract.deleteDocument(resolver, it) } }
-            return target
+        } else {
+            runCatching { DocumentsContract.deleteDocument(resolver, partUri) }
         }
 
-        // 5) 成功：清理备份
+        // ---- 5) 最后一道保险：正式名确实存在，才允许删备份 ----
+        val confirmed = findChild(tree, parent, name)
+        if (confirmed == null) {
+            // 正式名不见了 → 立刻还原，绝不留下「原文件只有 .bak」的状态
+            restoreBackup(resolver, tree, parent, backupUri, name)
+            throw IOException("写入后未能确认 $name 存在，已还原原文件")
+        }
+
         backupUri?.let { runCatching { DocumentsContract.deleteDocument(resolver, it) } }
-        return partUri
+        return confirmed
     }
+
+    /**
+     * 递归扫描 SAF 树，找出「只剩 `.mp4fix-bak`」的残留文件。
+     *
+     * 返回形如 `[{"backupName": "a.mp4.mp4fix-bak", "originalName": "a.mp4",
+     * "size": 123, "parentPath": "/baidu/flyflow", "parentUri": "..."}]` 的列表。
+     * 正式名仍然存在的 `.bak` 属于正常中间态，不列出。
+     */
+    private fun listBackupLeftovers(tree: Uri): List<Map<String, Any?>> {
+        val out = ArrayList<Map<String, Any?>>()
+        val resolver = contentResolver
+        // 栈里存 (目录 documentUri, 展示路径)
+        val stack = java.util.ArrayDeque<Pair<Uri, String>>()
+        stack.addLast(parentDocumentUri(tree) to "")
+        var visited = 0
+        while (stack.isNotEmpty() && visited < MAX_SCAN_DIRS) {
+            val (dir, rel) = stack.removeLast()
+            visited++
+            val childrenUri = try {
+                DocumentsContract.buildChildDocumentsUriUsingTree(
+                    tree, DocumentsContract.getDocumentId(dir)
+                )
+            } catch (_: Exception) {
+                continue
+            }
+            val names = HashMap<String, Pair<Uri, Long>>()  // name -> (uri, size)
+            val dirs = ArrayList<Pair<Uri, String>>()
+            try {
+                resolver.query(
+                    childrenUri,
+                    arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.COLUMN_SIZE,
+                    ),
+                    null, null, null,
+                )?.use { c ->
+                    while (c.moveToNext()) {
+                        val id = c.getString(0) ?: continue
+                        val nm = c.getString(1) ?: continue
+                        val mime = c.getString(2)
+                        val size = if (c.isNull(3)) -1L else c.getLong(3)
+                        val uri = DocumentsContract.buildDocumentUriUsingTree(tree, id)
+                        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                            val childRel = if (rel.isEmpty()) nm else "$rel/$nm"
+                            dirs.add(uri to childRel)
+                        } else {
+                            names[nm] = uri to size
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                continue
+            }
+            for ((uri, childRel) in dirs) stack.addLast(uri to childRel)
+
+            for ((nm, pair) in names) {
+                if (!nm.endsWith(BAK_SUFFIX)) continue
+                val original = nm.removeSuffix(BAK_SUFFIX)
+                // 正式名还在 → 正常中间态，跳过
+                if (names.containsKey(original)) continue
+                out.add(
+                    mapOf(
+                        "backupName" to nm,
+                        "originalName" to original,
+                        "size" to pair.second,
+                        "parentPath" to rel,
+                        "parentUri" to dir.toString(),
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    /** 把 `xxx.mp4fix-bak` 改回 `xxx`；正式名已存在时不覆盖。 */
+    private fun restoreBackupToOriginal(tree: Uri, backupName: String): Boolean {
+        val resolver = contentResolver
+        val original = backupName.removeSuffix(BAK_SUFFIX)
+        val parent = parentDocumentUri(tree)
+        val backup = findChild(tree, parent, backupName) ?: return false
+        if (findChild(tree, parent, original) != null) return false  // 不覆盖已有文件
+        runCatching { DocumentsContract.renameDocument(resolver, backup, original) }
+        return findChild(tree, parent, original) != null
+    }
+
+    /**
+     * 把让位的 `.bak` 改回正式名。**这是数据安全的最后防线** ——
+     * 任何一步失败都必须调用它，确保用户的原文件不会只剩一个 `.bak`。
+     */
+    private fun restoreBackup(
+        resolver: android.content.ContentResolver,
+        tree: Uri,
+        parent: Uri,
+        backupUri: Uri?,
+        name: String,
+    ) {
+        if (backupUri == null) return
+        // 正式名已被别的路径占用时先清掉，避免改名冲突
+        findChild(tree, parent, name)?.let {
+            runCatching { DocumentsContract.deleteDocument(resolver, it) }
+        }
+        runCatching { DocumentsContract.renameDocument(resolver, backupUri, name) }
+        // 复核：还原失败时保留 .bak（数据还在，用户可手动改回）
+        findChild(tree, parent, name)
+    }
+
 
     private fun parentDocumentUri(tree: Uri): Uri = try {
         DocumentsContract.buildDocumentUriUsingTree(
@@ -582,5 +760,11 @@ class MainActivity : FlutterActivity() {
         private const val MAX_FRAGMENTS = 20000 // 预取 moof 个数上限
         private const val MAX_BOX_COUNT = 50000 // 盒扫描保护上限
         private const val CRASH_FILE = "crash_last.txt" // 上一次未捕获异常（诊断用）
+
+        /** 让位备份的后缀（数据恢复靠它识别残留）。 */
+        private const val BAK_SUFFIX = ".mp4fix-bak"
+
+        /** 残留扫描的目录数上限（防止超大目录树卡死）。 */
+        private const val MAX_SCAN_DIRS = 20000
     }
 }
