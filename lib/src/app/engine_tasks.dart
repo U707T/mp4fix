@@ -10,6 +10,7 @@ import '../webdav/prefetch.dart';
 Future<InspectReport> inspectFileInIsolate(
   String path, {
   required int thresholdBytes,
+  double thresholdSeconds = Mp4Inspect.defaultInterleaveThresholdSeconds,
 }) {
   return Isolate.run(() {
     final input = FileSeekableInput(File(path));
@@ -17,6 +18,7 @@ Future<InspectReport> inspectFileInIsolate(
       return Mp4Inspect.inspect(
         input,
         interleaveThresholdBytes: thresholdBytes,
+        interleaveThresholdSeconds: thresholdSeconds,
       );
     } finally {
       input.close();
@@ -29,6 +31,7 @@ Future<InspectReport> inspectPrefetchedInIsolate(
   int size,
   List<({int start, Uint8List bytes})> ranges, {
   required int thresholdBytes,
+  double thresholdSeconds = Mp4Inspect.defaultInterleaveThresholdSeconds,
 }) {
   return Isolate.run(() {
     final input = PrefetchedSeekableInput(
@@ -39,6 +42,7 @@ Future<InspectReport> inspectPrefetchedInIsolate(
       return Mp4Inspect.inspect(
         input,
         interleaveThresholdBytes: thresholdBytes,
+        interleaveThresholdSeconds: thresholdSeconds,
       );
     } finally {
       input.close();

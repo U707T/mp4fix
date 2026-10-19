@@ -123,6 +123,7 @@ class _FolderPageState extends State<FolderPage> {
           collapsible: true,
           initiallyExpanded: false,
           summary: '阈值 ${controller.settings.thresholdMb} MB'
+              ' / ${controller.settings.thresholdSeconds.toStringAsFixed(1)} 秒'
               ' · ${controller.settings.includeOptimizable ? '含可优化' : '不含可优化'}',
           children: [
             Text(
@@ -134,7 +135,7 @@ class _FolderPageState extends State<FolderPage> {
             const SizedBox(height: Insets.gapLarge),
             Row(
               children: [
-                const Text('阈值'),
+                const Text('距离'),
                 const Spacer(),
                 SegmentedButton<int>(
                   showSelectedIcon: false,
@@ -148,6 +149,26 @@ class _FolderPageState extends State<FolderPage> {
                   onSelectionChanged: canRun
                       ? (values) => controller
                           .updateSettings((s) => s.thresholdMb = values.first)
+                      : null,
+                ),
+              ],
+            ),
+            Row(
+              children: [
+                const Text('时间'),
+                const Spacer(),
+                SegmentedButton<double>(
+                  showSelectedIcon: false,
+                  segments: const [
+                    ButtonSegment(value: 0.5, label: Text('0.5s')),
+                    ButtonSegment(value: 1.0, label: Text('1s')),
+                    ButtonSegment(value: 2.0, label: Text('2s')),
+                    ButtonSegment(value: 5.0, label: Text('5s')),
+                  ],
+                  selected: {controller.settings.thresholdSeconds},
+                  onSelectionChanged: canRun
+                      ? (values) => controller.updateSettings(
+                          (s) => s.thresholdSeconds = values.first)
                       : null,
                 ),
               ],

@@ -24,7 +24,7 @@ Future<void> main(List<String> args) async {
     case '-i':
       final path = opts.positional.isEmpty ? null : opts.positional.first;
       if (path == null) _usage();
-      _inspect(File(path!));
+      _inspect(File(path!), thresholdSeconds: opts.thresholdSeconds);
       return;
     case '--dav-scan':
       // 不带 URL 时用出厂默认服务器（AppDefaults）
@@ -61,17 +61,19 @@ void _usage() {
     ..writeln()
     ..writeln('选项:')
     ..writeln('  --user <用户名>  --pass <密码>  --threshold <MB，默认 4，可小数>')
+    ..writeln('  --threshold-seconds <秒，默认 2>  时间错位阈值（与 --threshold 任一满足即判需重排）')
     ..writeln('  --insecure（允许自签名证书）  --include-optimizable（含"可优化"）');
 }
 
 class _Options {
   _Options(this.positional, this.user, this.pass, this.thresholdMb,
-      this.insecure, this.includeOptimizable);
+      this.thresholdSeconds, this.insecure, this.includeOptimizable);
 
   final List<String> positional;
   final String? user;
   final String? pass;
   final double thresholdMb;
+  final double thresholdSeconds;
   final bool insecure;
   final bool includeOptimizable;
 
@@ -80,6 +82,7 @@ class _Options {
     String? user;
     String? pass;
     var threshold = 4.0;
+    var thresholdSeconds = Mp4Inspect.defaultInterleaveThresholdSeconds;
     var insecure = false;
     var includeOptimizable = false;
     for (var i = 0; i < args.length; i++) {
@@ -93,6 +96,11 @@ class _Options {
           if (i + 1 < args.length) {
             threshold = double.tryParse(args[++i]) ?? 4.0;
           }
+        case '--threshold-seconds':
+          if (i + 1 < args.length) {
+            thresholdSeconds = double.tryParse(args[++i]) ??
+                Mp4Inspect.defaultInterleaveThresholdSeconds;
+          }
         case '--insecure':
           insecure = true;
         case '--include-optimizable':
@@ -101,8 +109,8 @@ class _Options {
           if (!a.startsWith('--')) positional.add(a);
       }
     }
-    return _Options(
-        positional, user, pass, threshold, insecure, includeOptimizable);
+    return _Options(positional, user, pass, threshold, thresholdSeconds,
+        insecure, includeOptimizable);
   }
 
   WebDavClient client(String rootUrl) => WebDavClient(
@@ -125,14 +133,18 @@ String _healthText(Mp4Health h) => switch (h) {
 
 // ---------------------------------------------------------------- 本地
 
-void _inspect(File file) {
+void _inspect(File file, {double? thresholdSeconds}) {
   if (!file.existsSync()) {
     stderr.writeln('文件不存在: ${file.path}');
     exit(2);
   }
   final input = FileSeekableInput(file);
   try {
-    final r = Mp4Inspect.inspect(input);
+    final r = Mp4Inspect.inspect(
+      input,
+      interleaveThresholdSeconds: thresholdSeconds ??
+          Mp4Inspect.defaultInterleaveThresholdSeconds,
+    );
     stdout
       ..writeln('文件: ${file.path}')
       ..writeln('大小: ${formatBytes(r.fileSize)}')
@@ -184,7 +196,11 @@ Future<int> _davScan(String url, _Options opts) async {
   final client = opts.client(url);
   final cacheDir = Directory.systemTemp.createTempSync('mp4fix-dav');
   try {
-    final scanner = WebDavScanner(client, threshold: opts.thresholdBytes);
+    final scanner = WebDavScanner(
+          client,
+          threshold: opts.thresholdBytes,
+          thresholdSeconds: opts.thresholdSeconds,
+        );
     stdout.writeln('扫描中: $url（阈值 ${opts.thresholdMb} MB）…');
     final items = await scanner.scan(
       url,
@@ -213,7 +229,11 @@ Future<int> _davFix(String url, _Options opts) async {
   final client = opts.client(url);
   final cacheDir = Directory.systemTemp.createTempSync('mp4fix-dav');
   try {
-    final scanner = WebDavScanner(client, threshold: opts.thresholdBytes);
+    final scanner = WebDavScanner(
+          client,
+          threshold: opts.thresholdBytes,
+          thresholdSeconds: opts.thresholdSeconds,
+        );
     stdout.writeln('扫描中: $url …');
     final items = await scanner.scan(url, tempDir: cacheDir);
     final todo = items

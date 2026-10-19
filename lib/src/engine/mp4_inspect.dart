@@ -36,6 +36,8 @@ class InspectReport {
     required this.interleaveMaxBytes,
     required this.interleaveMeanBytes,
     required this.faststart,
+    this.interleaveMaxSeconds = 0,
+    this.interleaveMeanSeconds = 0,
   });
 
   final Mp4Health health;
@@ -52,6 +54,15 @@ class InspectReport {
 
   /// 同刻音视频样本距离的平均值（字节）。
   final int interleaveMeanBytes;
+
+  /// 同刻音视频在**时间轴**上的最大错位（秒）。
+  ///
+  /// 字节距离会随码率变化：低码率长视频即使音视频相隔几十秒，绝对字节数也可能
+  /// 不到几 MB，只看字节就会漏判。时间错位与码率无关，用来兜住这类文件。
+  final double interleaveMaxSeconds;
+
+  /// 同刻音视频在时间轴上的平均错位（秒）。
+  final double interleaveMeanSeconds;
 
   /// moov 是否已前置（faststart）。
   final bool faststart;
@@ -73,12 +84,21 @@ abstract final class Mp4Inspect {
   /// 交错距离默认阈值：≥ 4MB 视为需要重排。
   static const int defaultInterleaveThreshold = 4 * 1024 * 1024;
 
+  /// 时间错位默认阈值：≥ 2 秒视为需要重排。
+  ///
+  /// 字节阈值对高码率文件很敏感、对低码率文件却几乎不触发 —— 一个 300kbps 的
+  /// 长视频即使音视频相隔 60 秒，绝对字节距离也可能只有几 MB。时间错位与码率
+  /// 无关，两个条件**任一**满足即判「需重排」，既不会漏掉低码率文件，
+  /// 也不会误伤高码率但交错良好的文件。
+  static const double defaultInterleaveThresholdSeconds = 2.0;
+
   /// 交错采样的最大视频样本数（超大文件按步长抽样，控制耗时）。
   static const int _maxSampledVideoSamples = 400000;
 
   static InspectReport inspect(
     SeekableInput input, {
     int interleaveThresholdBytes = defaultInterleaveThreshold,
+    double interleaveThresholdSeconds = defaultInterleaveThresholdSeconds,
   }) {
     final fileSize = input.size;
     if (fileSize < 16) {
@@ -115,6 +135,7 @@ abstract final class Mp4Inspect {
         top,
         moov,
         interleaveThresholdBytes,
+        interleaveThresholdSeconds,
       );
     }
 
@@ -147,23 +168,34 @@ abstract final class Mp4Inspect {
     // ------------------------------------------------------------ 交错距离
     var maxDist = 0;
     var meanDist = 0;
+    var maxSec = 0.0;
+    var meanSec = 0.0;
     if (video != null && audio != null) {
       final d = _interleaveDistance(video, audio);
       maxDist = d.max;
       meanDist = d.mean;
+      maxSec = d.maxSec;
+      meanSec = d.meanSec;
     }
 
     final faststart = mdat == null || moov.start < mdat.start;
     final note = StringBuffer();
     if (video != null && audio != null) {
       note.write('同刻音视频距离：最大 ${formatBytes(maxDist)}、平均 ${formatBytes(meanDist)}');
+      // 时间错位只在它本身"值得说"时才展示，避免正常文件堆一堆 0ms 噪声
+      if (maxSec >= _noteSecondsFloor) {
+        note.write('（时间错位最大 ${_formatSeconds(maxSec)}）');
+      }
     } else {
       note.write('单轨文件');
     }
     if (!faststart) note.write('；moov 未前置（faststart）');
 
     final Mp4Health health;
-    if (video != null && audio != null && maxDist >= interleaveThresholdBytes) {
+    if (video != null &&
+        audio != null &&
+        (maxDist >= interleaveThresholdBytes ||
+            maxSec >= interleaveThresholdSeconds)) {
       health = Mp4Health.needsReinterleave;
     } else if (!faststart) {
       health = Mp4Health.optimizable;
@@ -174,8 +206,10 @@ abstract final class Mp4Inspect {
     final String detail;
     switch (health) {
       case Mp4Health.needsReinterleave:
-        detail = '$note（判定阈值 ${formatBytes(interleaveThresholdBytes)}：'
-            '最大距离超过它即视为交错不良；弱读取设备 / 流式播放易卡顿，可无损重排修复）';
+        detail = '$note（判定阈值 ${formatBytes(interleaveThresholdBytes)} / '
+            '${_formatSeconds(interleaveThresholdSeconds)}：'
+            '最大距离或时间错位超过任一阈值即视为交错不良；'
+            '弱读取设备 / 流式播放易卡顿，可无损重排修复）';
       case Mp4Health.optimizable:
         detail = '$note（可修复以优化串流体验）';
       default:
@@ -191,8 +225,22 @@ abstract final class Mp4Inspect {
       audioSamples: audio?.samples ?? 0,
       interleaveMaxBytes: maxDist,
       interleaveMeanBytes: meanDist,
+      interleaveMaxSeconds: maxSec,
+      interleaveMeanSeconds: meanSec,
       faststart: faststart,
     );
+  }
+
+  /// 时间错位在说明文字里的显示下限（低于它就不提，避免正常文件刷屏）。
+  static const double _noteSecondsFloor = 0.5;
+
+  /// 秒 → 人类可读（`1.5 秒` / `320 毫秒`）。
+  static String _formatSeconds(double s) {
+    if (s >= 1) {
+      final v = s.toStringAsFixed(s >= 10 ? 0 : 1);
+      return '$v 秒';
+    }
+    return '${(s * 1000).round()} 毫秒';
   }
 
   /// moov 里是否有 `mvex`（分片标记）；读取失败时返回 false（交由常规路径报错）。
@@ -216,6 +264,7 @@ abstract final class Mp4Inspect {
     List<Box> top,
     Box moov,
     int interleaveThresholdBytes,
+    double interleaveThresholdSeconds,
   ) {
     final List<Box> moovChildren;
     final Map<int, FragmentTrackDefaults> trexDefaults;
@@ -291,10 +340,14 @@ abstract final class Mp4Inspect {
 
     var maxDist = 0;
     var meanDist = 0;
+    var maxSec = 0.0;
+    var meanSec = 0.0;
     if (video != null && audio != null) {
       final d = _interleaveDistance(video, audio);
       maxDist = d.max;
       meanDist = d.mean;
+      maxSec = d.maxSec;
+      meanSec = d.meanSec;
     }
 
     final faststart = moov.start < moofs.first.start;
@@ -304,13 +357,19 @@ abstract final class Mp4Inspect {
         ' · 同刻音视频距离：最大 ${formatBytes(maxDist)}、'
         '平均 ${formatBytes(meanDist)}',
       );
+      if (maxSec >= _noteSecondsFloor) {
+        note.write('（时间错位最大 ${_formatSeconds(maxSec)}）');
+      }
     } else {
       note.write(' · 单轨文件');
     }
     if (!faststart) note.write('；moov 未前置（faststart）');
 
     final Mp4Health health;
-    if (video != null && audio != null && maxDist >= interleaveThresholdBytes) {
+    if (video != null &&
+        audio != null &&
+        (maxDist >= interleaveThresholdBytes ||
+            maxSec >= interleaveThresholdSeconds)) {
       health = Mp4Health.needsReinterleave;
     } else {
       health = Mp4Health.optimizable;
@@ -319,8 +378,10 @@ abstract final class Mp4Inspect {
     final String detail;
     switch (health) {
       case Mp4Health.needsReinterleave:
-        detail = '$note（判定阈值 ${formatBytes(interleaveThresholdBytes)}：'
-            '最大距离超过它即视为交错不良；将无损转换为标准 MP4 并重排音视频）';
+        detail = '$note（判定阈值 ${formatBytes(interleaveThresholdBytes)} / '
+            '${_formatSeconds(interleaveThresholdSeconds)}：'
+            '最大距离或时间错位超过任一阈值即视为交错不良；'
+            '将无损转换为标准 MP4 并重排音视频）';
       default:
         detail = '$note（可无损转换为标准 MP4，兼容性更好）';
     }
@@ -334,6 +395,8 @@ abstract final class Mp4Inspect {
       audioSamples: audio?.samples ?? 0,
       interleaveMaxBytes: maxDist,
       interleaveMeanBytes: meanDist,
+      interleaveMaxSeconds: maxSec,
+      interleaveMeanSeconds: meanSec,
       faststart: faststart,
     );
   }
@@ -347,12 +410,19 @@ abstract final class Mp4Inspect {
         audioSamples: 0,
         interleaveMaxBytes: 0,
         interleaveMeanBytes: 0,
+        interleaveMaxSeconds: 0,
+        interleaveMeanSeconds: 0,
         faststart: false,
       );
 
   // ---------------------------------------------------------------- 交错距离
 
-  static ({int max, int mean}) _interleaveDistance(
+  /// 同时测「字节距离」与「时间错位」。
+  ///
+  /// 字节距离反映播放器要跳读多远（受码率影响）；时间错位反映音视频在时间轴上
+  /// 差了多少（与码率无关）。两者一起用，才能同时兜住高码率与低码率文件。
+  static ({int max, int mean, double maxSec, double meanSec})
+      _interleaveDistance(
     _TrackInfo video,
     _TrackInfo audio,
   ) {
@@ -373,27 +443,43 @@ abstract final class Mp4Inspect {
     var count = 0;
     var max = 0;
     var sum = 0.0;
+    var maxSec = 0.0;
+    var sumSec = 0.0;
     var vi = 0;
     while (vi < vn) {
       final t = vDts[vi] / video.timescale;
       final j = _lowerBound(aTimes, t);
       var best = -1;
+      var bestSec = -1.0;
       var k = j - 1;
-      if (k >= 0 && k < an) best = (vOff[vi] - aOff[k]).abs();
+      if (k >= 0 && k < an) {
+        best = (vOff[vi] - aOff[k]).abs();
+        bestSec = (t - aTimes[k]).abs();
+      }
       k = j;
       if (k >= 0 && k < an) {
         final d = (vOff[vi] - aOff[k]).abs();
-        if (best < 0 || d < best) best = d;
+        if (best < 0 || d < best) {
+          best = d;
+          bestSec = (t - aTimes[k]).abs();
+        }
       }
       if (best >= 0) {
         if (best > max) max = best;
         sum += best;
+        if (bestSec > maxSec) maxSec = bestSec;
+        sumSec += bestSec;
         count++;
       }
       vi += step;
     }
     final mean = count == 0 ? 0 : (sum / count).toInt();
-    return (max: max, mean: mean);
+    return (
+      max: max,
+      mean: mean,
+      maxSec: maxSec,
+      meanSec: count == 0 ? 0.0 : sumSec / count,
+    );
   }
 
   static int _lowerBound(Float64List a, double v) {

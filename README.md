@@ -80,7 +80,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 - **SAF 写入的数据安全**：`name.mp4fix-part` → 校验大小 → **同名旧文件改名为 `.mp4fix-bak` 让位**
   （而不是先删）→ 改名转正 → 清理备份；任一步失败都会还原旧文件，消除「旧文件已删、新文件没写成」的窗口。
 
-## 测试（107 项，`flutter test`）
+## 测试（114 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -112,7 +112,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（107 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
+flutter test                     # 全部测试（114 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -127,8 +127,25 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 107 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 114 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.6.0 · 判定改为「时间 + 字节」双阈值）
+
+- **问题**：此前只按「最大交错距离（字节）」判定，阈值 4MB。字节距离随码率变化 ——
+  一个 300kbps 的长视频即使音视频在时间轴上相隔几十秒，绝对字节距离也可能只有几 MB，
+  **永远够不到 4MB 阈值 → 漏判**。高码率文件则相反，稍微错开就超过 4MB。
+- **修复**：新增**时间错位**指标（同刻音视频在时间轴上的偏差，与码率无关），
+  改为「**距离或时间错位任一超过阈值即判「需重排」**」：
+  - 距离阈值 4MB（可调 1/2/4/8M，与原行为一致）
+  - 时间阈值 2 秒（可调 0.5/1/2/5s，新增）
+  - 设置页 / 文件夹页「判定规则」两处都能调；CLI 新增 `--threshold-seconds`
+- **兼容**：默认时间阈值 2 秒不会改变原有判定结果（实测 good / bad_interleave /
+  moov_last / co64 等夹具判定全部不变，114 项测试全过）；老版本设置文件缺该字段时
+  自动回落到默认值。
+- **说明文字**：检测详情里时间错位 ≥0.5 秒时才展示，避免正常文件堆一串 0ms 噪声。
+- 测试 107 → 114（新增 `dual_threshold_test.dart`，含「字节阈值设成 1TB 时仅时间
+  阈值也能触发」与「老存档缺字段回落默认」两条关键回归，并做了反向验证）。
 
 ## 本版要点（v2.5.3 · 修复 Android「选完文件夹就白屏」）
 

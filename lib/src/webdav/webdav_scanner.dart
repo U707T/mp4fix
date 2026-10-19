@@ -38,6 +38,7 @@ class WebDavScanner {
   WebDavScanner(
     this.client, {
     this.threshold = Mp4Inspect.defaultInterleaveThreshold,
+    this.thresholdSeconds = Mp4Inspect.defaultInterleaveThresholdSeconds,
     this.maxDirs = 20000,
     this.maxFiles = 100000,
     this.fallbackDownloadLimit = 2 << 30,
@@ -46,6 +47,9 @@ class WebDavScanner {
 
   final WebDavClient client;
   final int threshold;
+
+  /// 时间错位阈值（秒）；与字节阈值任一满足即判「需重排」。
+  final double thresholdSeconds;
   final int maxDirs;
   final int maxFiles;
   final int fallbackDownloadLimit;
@@ -225,7 +229,11 @@ class WebDavScanner {
       isCancelled: isCancelled,
     );
     try {
-      return Mp4Inspect.inspect(input, interleaveThresholdBytes: threshold);
+      return Mp4Inspect.inspect(
+        input,
+        interleaveThresholdBytes: threshold,
+        interleaveThresholdSeconds: thresholdSeconds,
+      );
     } finally {
       input.close();
     }
@@ -255,7 +263,11 @@ class WebDavScanner {
       await client.download(entry.url, tmp);
       final input = FileSeekableInput(tmp);
       try {
-        return Mp4Inspect.inspect(input, interleaveThresholdBytes: threshold);
+        return Mp4Inspect.inspect(
+        input,
+        interleaveThresholdBytes: threshold,
+        interleaveThresholdSeconds: thresholdSeconds,
+      );
       } finally {
         input.close();
       }

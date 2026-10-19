@@ -413,6 +413,7 @@ String applyNameRule(
 class AppSettings {
   AppSettings({
     this.thresholdMb = AppDefaults.thresholdMb,
+    this.thresholdSeconds = AppDefaults.thresholdSeconds,
     this.includeOptimizable = false,
     this.themeMode = ThemeMode.system,
     this.outputTreeUri,
@@ -430,6 +431,12 @@ class AppSettings {
 
   /// 判定阈值（MB，最大交错距离）。
   int thresholdMb;
+
+  /// 判定阈值（秒，最大时间错位）。
+  ///
+  /// 字节阈值对低码率长视频几乎不触发（音视频相隔几十秒也只有几 MB），
+  /// 时间阈值与码率无关，用来兜住这类文件。两者任一满足即判「需重排」。
+  double thresholdSeconds;
   bool includeOptimizable;
   ThemeMode themeMode;
 
@@ -491,6 +498,7 @@ class AppSettings {
 
   Map<String, Object?> toJson() => {
     'thresholdMb': thresholdMb,
+    'thresholdSeconds': thresholdSeconds,
     'includeOptimizable': includeOptimizable,
     'themeMode': themeMode.name,
     'outputTreeUri': outputTreeUri,
@@ -508,6 +516,8 @@ class AppSettings {
 
   static AppSettings fromJson(Map<String, Object?> json) => AppSettings(
     thresholdMb: json['thresholdMb'] as int? ?? AppDefaults.thresholdMb,
+    thresholdSeconds: (json['thresholdSeconds'] as num?)?.toDouble() ??
+        AppDefaults.thresholdSeconds,
     includeOptimizable: json['includeOptimizable'] as bool? ?? false,
     themeMode: ThemeMode.values.firstWhere(
       (m) => m.name == json['themeMode'],

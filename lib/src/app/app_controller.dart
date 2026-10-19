@@ -607,6 +607,7 @@ class AppController extends ChangeNotifier {
   /// 当前阈值 / 可优化设置的展示文案。
   String get thresholdDescription =>
       '阈值 ${settings.thresholdMb} MB'
+      ' / ${settings.thresholdSeconds.toStringAsFixed(1)} 秒'
       '${settings.includeOptimizable ? ' · 含可优化' : ''}';
 
   /// 文件夹扫描输入目录的展示文案。
@@ -898,6 +899,7 @@ class AppController extends ChangeNotifier {
       final report = await inspectFileInIsolate(
         path,
         thresholdBytes: settings.thresholdBytes,
+        thresholdSeconds: settings.thresholdSeconds,
       );
       _applyReport(job, report);
     } catch (e) {
@@ -922,6 +924,7 @@ class AppController extends ChangeNotifier {
         pre.size,
         pre.ranges,
         thresholdBytes: settings.thresholdBytes,
+        thresholdSeconds: settings.thresholdSeconds,
       );
       _applyReport(job, report);
     } on SafNotSeekableException {
@@ -932,6 +935,7 @@ class AppController extends ChangeNotifier {
       final report = await inspectFileInIsolate(
         local,
         thresholdBytes: settings.thresholdBytes,
+        thresholdSeconds: settings.thresholdSeconds,
       );
       _applyReport(job, report);
     }
@@ -996,7 +1000,11 @@ class AppController extends ChangeNotifier {
     try {
       await _ensureLocalNetworkPermission();
       final cache = await _cache();
-      final scanner = WebDavScanner(client, threshold: settings.thresholdBytes);
+      final scanner = WebDavScanner(
+        client,
+        threshold: settings.thresholdBytes,
+        thresholdSeconds: settings.thresholdSeconds,
+      );
       final fresh = await scanner.inspectSingle(
         item,
         tempDir: cache,
@@ -1139,6 +1147,7 @@ class AppController extends ChangeNotifier {
           final report = await inspectFileInIsolate(
             f.path,
             thresholdBytes: settings.thresholdBytes,
+            thresholdSeconds: settings.thresholdSeconds,
           );
           _applyReport(job, report);
         } catch (err) {
@@ -1279,7 +1288,11 @@ class AppController extends ChangeNotifier {
     try {
       final cache = await _cache();
       await _ensureLocalNetworkPermission();
-      final scanner = WebDavScanner(client, threshold: settings.thresholdBytes);
+      final scanner = WebDavScanner(
+        client,
+        threshold: settings.thresholdBytes,
+        thresholdSeconds: settings.thresholdSeconds,
+      );
       final items = await scanner.scan(
         client.root,
         tempDir: cache,

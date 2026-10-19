@@ -18,6 +18,12 @@ abstract final class AppDefaults {
   /// 默认判定阈值（MB，最大交错距离）。
   static const int thresholdMb = 4;
 
+  /// 默认判定阈值（秒，最大时间错位）。
+  ///
+  /// 与 [thresholdMb] 任一满足即判「需重排」：高码率文件由字节阈值兜住，
+  /// 低码率长视频由时间阈值兜住。
+  static const double thresholdSeconds = 2.0;
+
   /// 由默认值拼出的完整 WebDAV 地址（命令行工具用）。
   static String get webDavUrl {
     final scheme = webDavHttps ? 'https' : 'http';

@@ -11,7 +11,7 @@ class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
   /// 与 pubspec.yaml 的 version 保持一致。
-  static const String appVersion = '2.5.3';
+  static const String appVersion = '2.6.0';
 
   @override
   Widget build(BuildContext context) {
@@ -30,11 +30,11 @@ class SettingsPage extends StatelessWidget {
             title: '判定规则',
             icon: Icons.tune_rounded,
             children: [
-              const Text('最大交错距离超过阈值即视为「需重排」'),
+              const Text('「最大交错距离」或「最大时间错位」超过任一阈值即视为「需重排」'),
               const SizedBox(height: Insets.gapLarge),
               Row(
                 children: [
-                  const Text('阈值'),
+                  const Text('距离'),
                   const Spacer(),
                   SegmentedButton<int>(
                     showSelectedIcon: false,
@@ -51,6 +51,34 @@ class SettingsPage extends StatelessWidget {
                         : null,
                   ),
                 ],
+              ),
+              Row(
+                children: [
+                  const Text('时间'),
+                  const Spacer(),
+                  SegmentedButton<double>(
+                    showSelectedIcon: false,
+                    segments: const [
+                      ButtonSegment(value: 0.5, label: Text('0.5s')),
+                      ButtonSegment(value: 1.0, label: Text('1s')),
+                      ButtonSegment(value: 2.0, label: Text('2s')),
+                      ButtonSegment(value: 5.0, label: Text('5s')),
+                    ],
+                    selected: {settings.thresholdSeconds},
+                    onSelectionChanged: canEdit
+                        ? (v) => controller
+                            .updateSettings((s) => s.thresholdSeconds = v.first)
+                        : null,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '时间阈值与码率无关：低码率长视频即使音视频相隔几十秒，'
+                '绝对字节距离也可能只有几 MB，光看距离会漏判。',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
               ),
               SwitchListTile(
                 dense: true,
