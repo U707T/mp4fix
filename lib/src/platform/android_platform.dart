@@ -21,6 +21,7 @@ class BackupLeftover {
     required this.originalName,
     required this.size,
     required this.parentPath,
+    required this.parentUri,
   });
 
   final String backupName;
@@ -29,6 +30,9 @@ class BackupLeftover {
 
   /// 相对扫描根目录的展示路径（空字符串表示根目录）。
   final String parentPath;
+
+  /// 所在目录的 document URI —— 恢复时要用它定位（残留文件可能在子目录里）。
+  final String parentUri;
 
   String get displayPath =>
       parentPath.isEmpty ? originalName : '$parentPath/$originalName';
@@ -177,6 +181,7 @@ class AndroidPlatform {
             originalName: originalName,
             size: (item['size'] as num?)?.toInt() ?? -1,
             parentPath: item['parentPath'] as String? ?? '',
+            parentUri: item['parentUri'] as String? ?? '',
           ),
         );
       }
@@ -192,11 +197,13 @@ class AndroidPlatform {
   static Future<bool> restoreBackup({
     required String treeUri,
     required String backupName,
+    String parentUri = '',
   }) async {
     try {
       final ok = await _channel.invokeMethod<bool>('restoreBackup', {
         'treeUri': treeUri,
         'backupName': backupName,
+        'parentUri': parentUri.isEmpty ? null : parentUri,
       });
       return ok ?? false;
     } catch (_) {

@@ -245,6 +245,7 @@ class AppController extends ChangeNotifier {
       final done = await AndroidPlatform.restoreBackup(
         treeUri: tree,
         backupName: it.backupName,
+        parentUri: it.parentUri,
       );
       if (done) {
         ok++;

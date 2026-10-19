@@ -132,14 +132,19 @@ class MainActivity : FlutterActivity() {
             }
 
             // 把某个 .mp4fix-bak 改回正式名（数据恢复）。
+            // 传 parentUri 而不是只传名字 —— 残留文件可能在子目录里（递归扫描发现的），
+            // 只在根目录找会漏掉绝大多数。
             "restoreBackup" -> {
                 val tree = call.argument<String>("treeUri")?.let(Uri::parse)
                 val backupName = call.argument<String>("backupName")
+                val parentUri = call.argument<String>("parentUri")?.let(Uri::parse)
                 if (tree == null || backupName.isNullOrBlank()) {
                     result.error("bad_args", "缺少参数", null)
                     return
                 }
-                runInBackground(result) { restoreBackupToOriginal(tree, backupName) }
+                runInBackground(result) {
+                    restoreBackupToOriginal(tree, backupName, parentUri)
+                }
             }
 
             "existsInTree" -> {
@@ -430,11 +435,19 @@ class MainActivity : FlutterActivity() {
         return out
     }
 
-    /** 把 `xxx.mp4fix-bak` 改回 `xxx`；正式名已存在时不覆盖。 */
-    private fun restoreBackupToOriginal(tree: Uri, backupName: String): Boolean {
+    /**
+     * 把 `xxx.mp4fix-bak` 改回 `xxx`；正式名已存在时不覆盖。
+     *
+     * [parentUri] 是残留文件所在的目录（递归扫描时带回来的）。为空时退回根目录。
+     */
+    private fun restoreBackupToOriginal(
+        tree: Uri,
+        backupName: String,
+        parentUri: Uri?,
+    ): Boolean {
         val resolver = contentResolver
         val original = backupName.removeSuffix(BAK_SUFFIX)
-        val parent = parentDocumentUri(tree)
+        val parent = parentUri ?: parentDocumentUri(tree)
         val backup = findChild(tree, parent, backupName) ?: return false
         if (findChild(tree, parent, original) != null) return false  // 不覆盖已有文件
         runCatching { DocumentsContract.renameDocument(resolver, backup, original) }

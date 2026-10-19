@@ -80,7 +80,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 - **SAF 写入的数据安全**：`name.mp4fix-part` → 校验大小 → **同名旧文件改名为 `.mp4fix-bak` 让位**
   （而不是先删）→ 改名转正 → 清理备份；任一步失败都会还原旧文件，消除「旧文件已删、新文件没写成」的窗口。
 
-## 测试（134 项，`flutter test`）
+## 测试（140 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -112,7 +112,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（134 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
+flutter test                     # 全部测试（140 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -127,8 +127,23 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 134 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 140 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.7.2 · 修复「残留恢复只查根目录」）
+
+v2.7.1 加了「恢复 .mp4fix-bak 残留」，但 `restoreBackup` **只在 SAF 根目录找文件**。
+而残留几乎都在子目录里（实际现场是 `/baidu/flyflow/xxx.mp4fix-bak`）——
+表现就是「扫描能扫到一堆、点恢复却全部失败」。
+
+**修复**：扫描结果带上 `parentUri`（残留所在目录），恢复时按该目录定位。
+现在子目录里的残留也能正确改回原名。
+
+### 测试
+
+- 134 → 140 项。新增 `backup_leftover_test.dart`：锁住「`parentUri` 必须原样
+  传给平台侧」与「缺字段 / 平台异常不崩」，并做了反向验证
+  （改回 v2.7.1 的实现后该测试立即报 `Expected: 'content://…/sub' / Actual: <null>`）。
 
 ## 本版要点（v2.7.1 · 🔴 紧急修复：SAF 落位把原文件变成 `.mp4fix-bak`）
 
