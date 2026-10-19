@@ -128,6 +128,52 @@ String normalizePickedPath(String raw) {
   return p;
 }
 
+/// SAF tree URI → 给人看的文件夹名。
+///
+/// `content://…/tree/primary%3ADCIM%2F%E7%9B%B8%E6%9C%BA` → `相机`
+///
+/// **只能解码一次**：`Uri.pathSegments` 取到的已经是解码后的字符串，再调一次
+/// [Uri.decodeComponent] 会抛 `Illegal percent encoding in URI`（文件夹名含
+/// 中文 / 空格 / `%` 时必现）。这个函数的调用点在 `build()` 里 —— 一抛就是整页
+/// 白屏，而且坏值已经写进设置文件，重启后照样白屏，用户连改设置都进不去。
+String treeUriDisplayName(String treeUri) {
+  final uri = Uri.tryParse(treeUri);
+  if (uri == null) return treeUri;
+  // 取原始（仍带百分号编码）路径；SAF 的形态是 `…/tree/<documentId>`
+  final rawSegments =
+      uri.path.split('/').where((s) => s.isNotEmpty).toList(growable: false);
+  if (rawSegments.isEmpty) return treeUri;
+  // `tree` 只是路径标记，不是目录名；它后面没有内容时说明 URI 不完整
+  final treeIndex = rawSegments.lastIndexOf('tree');
+  final tail = treeIndex >= 0
+      ? rawSegments.sublist(treeIndex + 1)
+      : <String>[rawSegments.last];
+  if (tail.isEmpty) return treeUri;
+
+  // 只在这里解码一次（`pathSegments` 已经解过一次，再解会抛异常）
+  final decoded = _tryDecodeComponent(tail.join('/'));
+  // `primary:Download` / `home:` 里的卷前缀对用户没意义，只留最后一级目录名
+  final colon = decoded.indexOf(':');
+  final withoutVolume = colon >= 0 ? decoded.substring(colon + 1) : decoded;
+  final parts =
+      withoutVolume.split('/').where((p) => p.isNotEmpty).toList(growable: false);
+  if (parts.isEmpty) {
+    // 卷根目录（如 `primary:`）→ 退回卷名
+    return colon > 0 ? decoded.substring(0, colon) : treeUri;
+  }
+  return parts.last;
+}
+
+/// 宽容版 [Uri.decodeComponent]：非法百分号（文件夹名里真有 `%`）时按原文返回，
+/// 绝不让"展示一个名字"把界面炸掉。
+String _tryDecodeComponent(String raw) {
+  try {
+    return Uri.decodeComponent(raw);
+  } catch (_) {
+    return raw;
+  }
+}
+
 bool _hasErrno(String text, int errno) =>
     RegExp('\\berrno = $errno\\b').hasMatch(text);
 

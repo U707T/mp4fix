@@ -80,7 +80,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 - **SAF 写入的数据安全**：`name.mp4fix-part` → 校验大小 → **同名旧文件改名为 `.mp4fix-bak` 让位**
   （而不是先删）→ 改名转正 → 清理备份；任一步失败都会还原旧文件，消除「旧文件已删、新文件没写成」的窗口。
 
-## 测试（98 项，`flutter test`）
+## 测试（107 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -112,7 +112,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（98 项：引擎 / 无损 / 金标准 / 分片 / WebDAV …）
+flutter test                     # 全部测试（107 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -127,8 +127,36 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 98 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 107 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.5.3 · 修复 Android「选完文件夹就白屏」）
+
+- **根因**：`_treeName()` 先取 `Uri.pathSegments`（**已经解码过一次**），又调了一次
+  `Uri.decodeComponent`。文件夹名含**中文 / 空格 / `%`** 时第二次解码抛
+  `Illegal percent encoding in URI`；而这个函数的调用点全在 `build()` 里
+  （`scanInputDescription` / `outputDescription`）→ 整棵子树被换成 `ErrorWidget`
+  → **release 下没有红色报错屏，只有一片白**（debug 下才看得到红底报错）；
+- **为什么重启也好不了**：坏 URI 在 `pickScanInputFolder()` 里已经写进 `settings.json`，
+  每次启动 `init()` 读回来 → 一进「文件夹」页就白屏，**连设置页都进不去**；
+  这也解释了「不选文件夹就一切正常」；
+- **修复**：新增纯函数 `treeUriDisplayName()`（`models.dart`）—— 只解码一次、
+  非法百分号按原文兜底、剥掉 `primary:` 卷前缀只留最后一级目录名；
+  `_treeName()` 改为转发，杜绝再写第二套解码逻辑；
+- **同时修掉的三个真 bug**：
+  - **「停止」按钮形同虚设**：`_setRunning()` 无条件清 `_cancelRequested`，而任务收尾的
+    `_setRunning(null)` 也走这里 → `scanFolder(fixAfterScan: true)` 复位后判断恒为真，
+    用户点了停止、扫描停了，**却立刻又照列表开始批量修复**；
+  - **输入文件夹没要写权限**：`pickDirectory()` 裸调，既无 `persistablePermission`
+    （重启后 URI 失效 → 扫描 `SecurityException`），也无 `writePermission`
+    （默认「就地覆盖输入文件夹」→ `createDocument` 抛 `SecurityException`，
+    表现为每个文件都修复失败）；
+  - **`running` 可能永久卡死**：`outputTarget()` / `_cache()` 在 `try` 外，抛错则
+    `_setRunning(null)` 不执行 → 界面上所有按钮永久 disabled，只能杀进程；
+- **清理**：删死代码 `if_<T>`（零调用）；`_isVideoName` 与 `engine_tasks.dart`
+  的 `isVideoFileName` 重复实现 → 统一；
+- 测试 98 → 107（新增 `tree_name_test.dart` / `cancel_test.dart`，两者都做了
+  「改回旧实现必须失败」的反向验证）。
 
 ## 本版要点（v2.5.2 · 修复 Android「一按扫描就闪退」）
 

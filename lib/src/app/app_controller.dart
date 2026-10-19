@@ -81,6 +81,16 @@ class AppController extends ChangeNotifier {
 
   bool get running => _runningSource != null;
 
+  /// 当前这批任务是否已被要求停止。
+  ///
+  /// 公开出来是为了让「扫描阶段取消后不应自动接着修复」这条规则可被测试
+  /// （见 `test/cancel_test.dart`）。
+  bool get cancelRequested => _cancelRequested;
+
+  /// 仅供测试：直接驱动运行状态机（`_setRunning` 是私有的）。
+  @visibleForTesting
+  void debugSetRunning(JobSource? source) => _setRunning(source);
+
   JobSource? get runningSource => _runningSource;
 
   /// 正在后台跑的那次修复（取消时立即中断）。
@@ -350,7 +360,14 @@ class AppController extends ChangeNotifier {
 
   void _setRunning(JobSource? source) {
     _runningSource = source;
-    _cancelRequested = false;
+    // 只在「开始一个新任务」时清掉取消标记。
+    //
+    // 以前这里无条件 `_cancelRequested = false`，而 `_setRunning(null)`（任务
+    // 结束）也会走到 —— 于是 `scanFolder()` / `scanWebDav()` 在 finally 里复位
+    // 运行状态后，紧接着的 `if (fixAfterScan && !_cancelRequested)` 永远为真：
+    // 用户在扫描阶段点了「停止」，扫描确实停了，**但立刻又照着已经扫到的列表
+    // 开始批量修复**，取消形同虚设。
+    if (source != null) _cancelRequested = false;
     if (AndroidPlatform.isSupported) {
       if (source == null) {
         unawaited(AndroidPlatform.stopTaskService());
@@ -542,12 +559,10 @@ class AppController extends ChangeNotifier {
     return defaultOutputTarget();
   }
 
-  String _treeName(String treeUri) {
-    final segments = Uri.tryParse(treeUri)?.pathSegments ?? const <String>[];
-    if (segments.isEmpty) return treeUri;
-    final seg = segments.last;
-    return seg.isEmpty ? treeUri : Uri.decodeComponent(seg);
-  }
+  /// SAF tree URI → 展示名。实现在 [treeUriDisplayName]（纯函数、可单测）；
+  /// 这里只做转发，**不要**再就地写一套解码逻辑 —— 之前那版重复解码，
+  /// 中文文件夹名直接把文件夹页炸成白屏。
+  String _treeName(String treeUri) => treeUriDisplayName(treeUri);
 
   /// 文件夹任务的输出目标：**没选输出文件夹时就地覆盖输入文件夹**（少选一次目录）。
   Future<OutputTarget> folderOutputTarget() async {
@@ -633,7 +648,16 @@ class AppController extends ChangeNotifier {
   Future<void> pickScanInputFolder() async {
     lastNotice = null;
     if (AndroidPlatform.isSupported) {
-      final dir = await SafUtil().pickDirectory();
+      // 两个 flag 都不能省：
+      //  - `persistablePermission`：不加就只在本次进程内有效，URI 虽然写进了
+      //    settings.json，重启后权限已失效 → 扫描直接 SecurityException；
+      //  - `writePermission`：默认行为是「没选输出文件夹就地覆盖输入文件夹」
+      //    （见 folderOutputTarget），只拿读权限时 createDocument 会抛
+      //    SecurityException —— 表现为「每个文件都修复失败」。
+      final dir = await SafUtil().pickDirectory(
+        writePermission: true,
+        persistablePermission: true,
+      );
       if (dir != null) {
         updateSettings((s) => s.scanInputTreeUri = dir.uri);
       }
@@ -1128,13 +1152,6 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  static bool _isVideoName(String name) {
-    final dot = name.lastIndexOf('.');
-    if (dot < 0) return false;
-    final ext = name.substring(dot + 1).toLowerCase();
-    return ext == 'mp4' || ext == 'm4v' || ext == 'mov';
-  }
-
   /// SAF 树递归列举视频（返回 uri / 展示路径 / 名称 / 大小 / 修改时间）。
   Future<
       List<
@@ -1177,7 +1194,7 @@ class AppController extends ChangeNotifier {
         if (child.isDir) {
           if (skip.contains(name.toLowerCase())) continue;
           stack.add((uri: child.uri, rel: rel));
-        } else if (_isVideoName(name)) {
+        } else if (isVideoFileName(name)) {
           out.add((
             uri: child.uri,
             path: rel,
@@ -1259,8 +1276,8 @@ class AppController extends ChangeNotifier {
     if (running) return;
     final client = _webDavClient();
     _setRunning(JobSource.webdav);
-    final cache = await _cache();
     try {
+      final cache = await _cache();
       await _ensureLocalNetworkPermission();
       final scanner = WebDavScanner(client, threshold: settings.thresholdBytes);
       final items = await scanner.scan(
@@ -1309,9 +1326,9 @@ class AppController extends ChangeNotifier {
     webDavUploadCopies = uploadCopies;
     final client = _webDavClient();
     _setRunning(JobSource.webdav);
-    final cache = await _cache();
-    final fixer = WebDavFixer(client, cacheDir: cache, repair: _isolateRepair);
     try {
+      final cache = await _cache();
+      final fixer = WebDavFixer(client, cacheDir: cache, repair: _isolateRepair);
       await _ensureLocalNetworkPermission();
       final base = only ??
           jobs.where((j) => j.source == JobSource.webdav).toList();
@@ -1468,12 +1485,16 @@ class AppController extends ChangeNotifier {
     if (targets.isEmpty) return;
     _setRunning(source);
     _setBatch(targets.length);
-    // 文件夹任务未指定输出时就地覆盖输入（其余来源用常规输出目标）
-    final output = source == JobSource.folder
-        ? await folderOutputTarget()
-        : await outputTarget();
-    final cache = await _cache();
+    // 注意：`outputTarget()` / `_cache()` 都可能抛（没有下载目录、path_provider
+    // 失败…）。它们必须待在 try 里 —— 否则 `_setRunning(null)` 不会执行，
+    // `running` 永久为真，界面上所有按钮（添加 / 扫描 / 修复 / 设置）从此全是
+    // disabled，只能杀进程。
     try {
+      // 文件夹任务未指定输出时就地覆盖输入（其余来源用常规输出目标）
+      final output = source == JobSource.folder
+          ? await folderOutputTarget()
+          : await outputTarget();
+      final cache = await _cache();
       for (var index = 0; index < targets.length; index++) {
         final job = targets[index];
         if (_cancelRequested) break;
@@ -1641,6 +1662,3 @@ class AppController extends ChangeNotifier {
     }
   }
 }
-
-/// 小工具：条件成立时返回 [build] 的结果，否则 null。
-T? if_<T>(bool condition, T Function() build) => condition ? build() : null;
