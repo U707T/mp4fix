@@ -526,12 +526,21 @@ class AppController extends ChangeNotifier {
     _scheduleLedgerSave();
   }
 
-  /// 按命名规则生成输出文件名；WebDAV 上传副本还要保证不与原文件同名
-  /// （规则没改名时保底用 `_fixed` 后缀）。
+  /// 按命名规则生成输出文件名。
+  ///
+  /// **保留原扩展名**：以前这里硬编码成 `.mp4`，于是 `.mov` / `.m4v` 修复后
+  /// 会变成 `同名.mp4` —— 在「就地覆盖输入文件夹」模式下，产物名和原文件对不上，
+  /// 结果是**原 `.mov` 没被替换，反而多出一个 `.mp4`**，用户看到的就是
+  /// 「修完了但文件夹里多了一堆文件、原文件还是卡的」。
   String _outputName(FixJob job) {
     final dot = job.name.lastIndexOf('.');
-    final base = dot > 0 ? job.name.substring(0, dot) : job.name;
-    return settings.applyOutputName('$base.mp4');
+    if (dot <= 0 || dot == job.name.length - 1) {
+      // 没有扩展名 → 保持无扩展名，交给命名规则
+      return settings.applyOutputName(job.name);
+    }
+    final base = job.name.substring(0, dot);
+    final ext = job.name.substring(dot); // 含点，保留原大小写
+    return settings.applyOutputName('$base$ext');
   }
 
   String _webDavCopyName(FixJob job) {
@@ -805,6 +814,7 @@ class AppController extends ChangeNotifier {
     if (files.isEmpty) return;
 
     final created = <FixJob>[];
+    var skipped = 0;
     for (final f in files) {
       var path = f.path;
       String? sourceUri;
@@ -818,6 +828,21 @@ class AppController extends ChangeNotifier {
       }
       if (path == null && sourceUri == null) continue;
       if (path != null) path = normalizePickedPath(path);
+
+      // 同一个文件已经在列表里（重复点「添加视频」）→ 跳过，不要生成重复任务。
+      // 否则同一文件会被检测两次、修两次，还可能互相覆盖输出。
+      final already = jobs.any(
+        (j) =>
+            j.source == JobSource.local &&
+            j.name == f.name &&
+            ((path != null && j.localPath == path) ||
+                (sourceUri != null && j.sourceUri == sourceUri)),
+      );
+      if (already) {
+        skipped++;
+        continue;
+      }
+
       created.add(_newJob(
         source: JobSource.local,
         name: f.name,
@@ -829,6 +854,10 @@ class AppController extends ChangeNotifier {
         sourceUri: sourceUri,
         modifiedMs: path == null ? 0 : _modifiedMs(File(path)),
       ));
+    }
+    if (skipped > 0) {
+      lastNotice = '已跳过 $skipped 个已在列表里的文件';
+      notifyListeners();
     }
     if (created.isEmpty) return;
     await _inspectLocalJobs(created);
@@ -868,6 +897,12 @@ class AppController extends ChangeNotifier {
 
   /// 检测单个本地任务（含「已修复」复用判定）。
   Future<void> _inspectLocalJob(FixJob job) async {
+    // ★ 先查修复记录：产物还在就直接标「已修复」，跳过检测。
+    //   桌面目录能同步确认产物存在，所以这里可以前置判定。
+    if (await _tryReuse(job)) {
+      notifyListeners();
+      return;
+    }
     final path = job.localPath;
     if (path == null) {
       // Android content:// 来源：优先只读预取；不可用时退回复制到缓存
@@ -882,7 +917,6 @@ class AppController extends ChangeNotifier {
           job.status = JobStatus.error;
           job.message = _message(e);
         }
-        await _tryReuse(job);
         notifyListeners();
         return;
       }
@@ -906,8 +940,6 @@ class AppController extends ChangeNotifier {
       job.status = JobStatus.error;
       job.message = _message(e);
     }
-    // 修过的文件直接标记「复用上次结果」（文件没变过才会命中）
-    await _tryReuse(job);
     notifyListeners();
   }
 
@@ -1045,6 +1077,11 @@ class AppController extends ChangeNotifier {
   Future<void> scanFolder({bool fixAfterScan = false}) async {
     if (running) return;
     lastNotice = null;
+    // ★ 重新扫描前先清掉上一轮的文件夹任务。
+    //   以前不清：同一个文件夹点两次「仅扫描」，列表会变成两倍（重复条目），
+    //   「扫描并修复」再点一次更糟 —— 同一文件被排进两批、修两遍。
+    //   _cleared 会保留快照，用户仍可用「撤销」找回（与「清空」一致）。
+    if (jobsOf(JobSource.folder).isNotEmpty) clearJobs(JobSource.folder);
     final targets = <FixJob>[];
     try {
       await _scanFolderInner(targets);
@@ -1141,6 +1178,14 @@ class AppController extends ChangeNotifier {
           modifiedMs: f.modifiedMs,
         );
         targets.add(job);
+        // ★ 先查修复记录：命中且产物还在 → 直接标「已修复」，**跳过检测**。
+        //   之前这段放在检测之后，等于「复用」只省了修复、没省检测 ——
+        //   已修复过的大目录重新扫描，仍然要把每个文件的 moov 全部解析一遍。
+        //   桌面目录可以用 existsSync 同步确认，所以能在检测前判定。
+        if (await _tryReuse(job)) {
+          _tickBatch(li + 1);
+          continue;
+        }
         job.status = JobStatus.inspecting;
         notifyListeners();
         try {
@@ -1154,8 +1199,6 @@ class AppController extends ChangeNotifier {
           job.status = JobStatus.error;
           job.message = _message(err);
         }
-        // 已修复过（产物还在）→ 标记复用，后面的"修复"会跳过它
-        await _tryReuse(job);
         _tickBatch(li + 1);
       }
     }
@@ -1570,18 +1613,29 @@ class AppController extends ChangeNotifier {
             job.status = JobStatus.cancelled;
             job.message = '已取消';
           } else {
-            final saved = await output.save(tmp, outName);
-            job.outputPath = saved;
-            job.status = JobStatus.saved;
-            job.message = '已保存：$saved';
-            if (output.ledgerKind == 'dir') lastSavedPath = saved;
-            _recordRepair(
-              job: job,
-              outName: outName,
-              kind: output.ledgerKind,
-              ref: output.ledgerRef,
-              mode: source == JobSource.folder ? '文件夹批量' : '本地文件',
+            // ★ 覆盖前的最后一道闸：产物必须完整可解析，否则绝不落位。
+            //   覆盖是**不可逆**的 —— 就地覆盖模式下写坏了，用户的原片就没了。
+            final invalid = validateRepairOutput(
+              tmp,
+              expectedBytes: task.outputBytes,
             );
+            if (invalid != null) {
+              job.status = JobStatus.failed;
+              job.message = '已中止覆盖：$invalid（原文件未改动）';
+            } else {
+              final saved = await output.save(tmp, outName);
+              job.outputPath = saved;
+              job.status = JobStatus.saved;
+              job.message = '已保存：$saved';
+              if (output.ledgerKind == 'dir') lastSavedPath = saved;
+              _recordRepair(
+                job: job,
+                outName: outName,
+                kind: output.ledgerKind,
+                ref: output.ledgerRef,
+                mode: source == JobSource.folder ? '文件夹批量' : '本地文件',
+              );
+            }
           }
         } catch (e) {
           job.status = (e is RepairCancelledException || task?.cancelled == true)

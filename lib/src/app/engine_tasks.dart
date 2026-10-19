@@ -129,6 +129,13 @@ class RepairTask {
   /// 修复结果（失败时抛出 [RepairException] / [RepairCancelledException]）。
   Future<RepairStats> get done => _completer.future;
 
+  /// 已完成的修复统计（未完成时为 null）。落位前校验产物大小要用它。
+  RepairStats? get stats => _stats;
+  RepairStats? _stats;
+
+  /// 引擎报告的预期输出字节数（拿不到时返回 0，表示跳过大小比对）。
+  int get outputBytes => _stats?.outputBytes ?? 0;
+
   /// 立即取消（杀死 Isolate；半成品文件由调用方清理）。
   void cancel() {
     _cancelled = true;
@@ -159,8 +166,10 @@ class RepairTask {
         case 'progress':
           onProgress?.call(message['done'] as int, message['total'] as int);
         case 'done':
+          final stats = message['stats'] as RepairStats;
+          task._stats = stats;
           if (!completer.isCompleted) {
-            completer.complete(message['stats'] as RepairStats);
+            completer.complete(stats);
           }
           port.close();
           isolate.kill(priority: Isolate.beforeNextEvent);
