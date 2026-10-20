@@ -55,4 +55,23 @@ void main() {
     expect(nested.existsSync(), isTrue);
     expect(File('${nested.path}/x.mp4').readAsStringSync(), 'x');
   });
+  test('子目录 / 文件名里的 . / .. 段被丢弃（外部路径不能写出输出目录）', () async {
+    final out = Directory('${dir.path}/out')..createSync();
+    final src = File('${dir.path}/s')..writeAsStringSync('x');
+
+    final saved = await DirectoryOutputTarget(out).save(
+      src,
+      '../../x.mp4',
+      subDir: '../../evil',
+    );
+
+    expect(
+      saved,
+      '${out.path}${Platform.pathSeparator}evil'
+      '${Platform.pathSeparator}x.mp4',
+    );
+    expect(File('${dir.path}/evil/x.mp4').existsSync(), isFalse);
+    expect(File('${out.path}/evil/x.mp4').existsSync(), isTrue,
+        reason: '只丢弃 `..`，其余目录名与文件名保留');
+  });
 }

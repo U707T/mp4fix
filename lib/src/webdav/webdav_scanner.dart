@@ -43,7 +43,7 @@ class WebDavScanner {
     this.maxDirs = 20000,
     this.maxFiles = 100000,
     this.fallbackDownloadLimit = 2 << 30,
-    this.maxMoovBytes = 256 << 20,
+    this.maxMoovBytes = 64 << 20,
     this.fileConcurrency = 4,
     this.dirConcurrency = 3,
   });
@@ -56,6 +56,12 @@ class WebDavScanner {
   final int maxDirs;
   final int maxFiles;
   final int fallbackDownloadLimit;
+
+  /// 单个 moov 的预取上限。
+  ///
+  /// 并行扫描时内存里同时有「并发数 × 上限」的预取数据：4 路 × 256MB
+  /// 峰值可达 1GB。正常 4K 长片的 moov 通常只有几 MB~几十 MB，64MB 足够；
+  /// 超过就明确提示下载到本地处理，而不是冒 OOM 的险。
   final int maxMoovBytes;
 
   /// 同时检测的文件数。
@@ -306,7 +312,25 @@ class WebDavScanner {
     return ok;
   }
 
+  /// 整档下载降级的并发闸门：服务器不支持 Range 时，最坏会退化成整档
+  /// 下载；同时开 4 个 2GB 文件会把临时空间瞬间打满。限制 2 路。
+  final Semaphore _fallbackGate = Semaphore(2);
+
   Future<InspectReport> _inspectViaDownload(
+    DavEntry entry,
+    Directory tempDir, {
+    bool Function()? isCancelled,
+  }) {
+    // 等闸门之前先看一眼：取消后排队中的任务不必再发起整档下载
+    if (isCancelled?.call() ?? false) {
+      return Future.error(WebDavException('已取消'));
+    }
+    return _fallbackGate.run(
+      () => _downloadAndInspect(entry, tempDir, isCancelled: isCancelled),
+    );
+  }
+
+  Future<InspectReport> _downloadAndInspect(
     DavEntry entry,
     Directory tempDir, {
     bool Function()? isCancelled,

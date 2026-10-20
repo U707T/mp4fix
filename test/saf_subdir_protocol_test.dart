@@ -13,6 +13,7 @@ void main() {
   const channel = MethodChannel('mp4fix/platform');
 
   tearDown(() {
+    AndroidPlatform.endWriteBatch();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, null);
   });
@@ -57,6 +58,48 @@ void main() {
       name: 'a.mp4',
       sourcePath: '/c/a.mp4',
     );
+  });
+
+  test('批量写入代数：开始批次后所有写入都带 epoch，结束后恢复旧协议', () async {
+    final epochs = <Object?>[];
+    mock((call) async {
+      if (call.method == 'writeEpoch') return 7;
+      final args = call.arguments as Map;
+      epochs.add(args['epoch']);
+      return switch (call.method) {
+        'copyToCache' => '/cache/x.mp4',
+        'saveToDownloads' => 'Download/MP4Fix/a.mp4',
+        _ => 'content://tree/root/document/x',
+      };
+    });
+
+    await AndroidPlatform.beginWriteBatch();
+    await AndroidPlatform.writeToTree(
+      treeUri: 'content://tree/root',
+      name: 'a.mp4',
+      sourcePath: '/cache/a.mp4',
+    );
+    await AndroidPlatform.saveToDownloads(
+      name: 'a.mp4',
+      sourcePath: '/cache/a.mp4',
+    );
+    await AndroidPlatform.copyToCache(
+      uri: 'content://in/a.mp4',
+      name: 'a.mp4',
+    );
+    expect(
+      epochs,
+      [7, 7, 7],
+      reason: '停止之后才开始的写入也必须用批次开始时的代数，才能立刻中止',
+    );
+
+    AndroidPlatform.endWriteBatch();
+    await AndroidPlatform.writeToTree(
+      treeUri: 'content://tree/root',
+      name: 'b.mp4',
+      sourcePath: '/cache/b.mp4',
+    );
+    expect(epochs.last, isNull, reason: '批次结束后回到「取当前代数」的旧行为');
   });
 
   test('平台侧取消 → SafWriteCancelledException（不是失败）', () async {

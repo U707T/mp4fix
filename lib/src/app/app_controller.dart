@@ -434,7 +434,9 @@ class AppController extends ChangeNotifier {
       relDir: relDir,
     );
     jobs.add(job);
-    if (notify) notifyListeners();
+    // 扫描大目录时每个文件都会 new 一条：以前每次都全量 notify（几十万次），
+    // 列表重建风暴会让扫描本身变慢。这里统一走 10 次/秒的节流。
+    if (notify) _notifyThrottled();
     return job;
   }
 
@@ -500,8 +502,12 @@ class AppController extends ChangeNotifier {
     if (source != null) _cancelRequested = false;
     if (AndroidPlatform.isSupported) {
       if (source == null) {
+        AndroidPlatform.endWriteBatch();
         unawaited(AndroidPlatform.stopTaskService());
       } else {
+        // 平台写入固定在本批次的取消代数上：停止之后才开始的 SAF 拷贝
+        // 也会立刻中止（并行时任务切换很频繁，这个窗口不能留）。
+        unawaited(AndroidPlatform.beginWriteBatch());
         _taskTitle = 'MP4 修复器 · ${_sourceLabel(source)}';
         unawaited(
           AndroidPlatform.startTaskService(
@@ -761,20 +767,20 @@ class AppController extends ChangeNotifier {
     final dot = job.name.lastIndexOf('.');
     if (dot <= 0 || dot == job.name.length - 1) {
       // 没有扩展名 → 保持无扩展名，交给命名规则
-      return settings.applyOutputName(job.name);
+      return sanitizeOutputFileName(settings.applyOutputName(job.name));
     }
     final base = job.name.substring(0, dot);
     final ext = job.name.substring(dot); // 含点，保留原大小写
-    return settings.applyOutputName('$base$ext');
+    return sanitizeOutputFileName(settings.applyOutputName('$base$ext'));
   }
 
   String _webDavCopyName(FixJob job) {
     final renamed = settings.applyOutputName(job.name);
-    if (renamed != job.name) return renamed;
+    if (renamed != job.name) return sanitizeOutputFileName(renamed);
     final dot = job.name.lastIndexOf('.');
     final base = dot > 0 ? job.name.substring(0, dot) : job.name;
     final ext = dot > 0 ? job.name.substring(dot + 1) : 'mp4';
-    return '${base}_fixed.$ext';
+    return sanitizeOutputFileName('${base}_fixed.$ext');
   }
 
   // ---------------------------------------------------------------- 输出目标
@@ -1146,6 +1152,9 @@ class AppController extends ChangeNotifier {
           activeJobCount++;
           try {
             await _inspectLocalJob(job);
+          } catch (e) {
+            job.status = JobStatus.error;
+            job.message = _message(e);
           } finally {
             activeJobCount--;
             _tickBatch(++completed);
@@ -1469,6 +1478,11 @@ class AppController extends ChangeNotifier {
               job.message = _message(err);
             }
             _notifyThrottled();
+          } catch (err) {
+            // 复用查询 / 状态更新等意外错误：给这一条一个明确结果，
+            // 不能让它永远停在「待检测」。
+            job.status = JobStatus.error;
+            job.message = _message(err);
           } finally {
             activeJobCount--;
             _tickBatch(++completed);
@@ -1526,6 +1540,9 @@ class AppController extends ChangeNotifier {
               job.status = JobStatus.error;
               job.message = _message(err);
             }
+          } catch (err) {
+            job.status = JobStatus.error;
+            job.message = _message(err);
           } finally {
             activeJobCount--;
             _tickBatch(++completed);
@@ -1703,6 +1720,9 @@ class AppController extends ChangeNotifier {
             displayPath: item.path,
             size: item.size,
             webDavUrl: item.url,
+            // 「保存到本地」要保留远端子目录：否则不同目录下的同名文件
+            // 会全部落到输出根目录，后一个覆盖前一个（并行时更隐蔽）。
+            relDir: relativeDirOf(item.path),
           );
           if (item.report != null) {
             _applyReport(job, item.report!);
@@ -1785,6 +1805,7 @@ class AppController extends ChangeNotifier {
             );
           } catch (e) {
             job.status = JobStatus.failed;
+            job.progress = 0;
             job.message = _message(e);
           } finally {
             activeJobCount--;
@@ -1872,7 +1893,8 @@ class AppController extends ChangeNotifier {
           job.status = JobStatus.failed;
           job.message = '保存失败：没有可用的输出位置';
         } else {
-          final outName = settings.applyOutputName(job.name);
+          final outName =
+              sanitizeOutputFileName(settings.applyOutputName(job.name));
           try {
             final saved = await output.save(
               tmp,
@@ -1982,6 +2004,7 @@ class AppController extends ChangeNotifier {
             // _fixLocalJob 内部已兜底；这里再拦一层，避免未知异常把任务
             // 永久留在「修复中」状态（列表看着像卡住）。
             job.status = JobStatus.failed;
+            job.progress = 0;
             job.message = _message(e);
           } finally {
             activeJobCount--;
@@ -2123,7 +2146,11 @@ class AppController extends ChangeNotifier {
   Future<void> _cleanStaleCaches() async {
     try {
       final tmp = await getTemporaryDirectory();
+      // `imports/`：content:// 复制进来的整份视频；
+      // `work/`：修复中间产物 / WebDAV 探针文件。上次会话崩溃时可能留下
+      // 几 GB 的半成品，启动时任务列表还没恢复，直接清掉是安全的。
       _deleteContents(Directory('${tmp.path}/imports'));
+      _deleteContents(Directory('${tmp.path}/work'));
     } catch (_) {
       // 忽略
     }

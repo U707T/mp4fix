@@ -4,6 +4,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../engine/engine.dart';
 import '../platform/android_platform.dart';
+import 'models.dart';
 
 /// 修复产物的输出目标。
 abstract class OutputTarget {
@@ -97,10 +98,19 @@ class DirectoryOutputTarget implements OutputTarget {
 
   @override
   Future<String> save(File source, String name, {String subDir = ''}) async {
-    // 子目录按需创建（`a/b/c` 也会一次建出来）
-    final dir = subDir.isEmpty ? this.dir : Directory('${this.dir.path}/$subDir');
+    // 子目录按需创建（`a/b/c` 也会一次建出来）；同时过滤 `.` / `..`，
+    // 防止外部来源（WebDAV 目录名）把产物写到输出目录之外。
+    final segments = subDir
+        .split(RegExp(r'[\\/]'))
+        .where((s) => s.isNotEmpty && s != '.' && s != '..')
+        .toList(growable: false);
+    final dir = segments.isEmpty
+        ? this.dir
+        : Directory('${this.dir.path}${Platform.pathSeparator}'
+            '${segments.join(Platform.pathSeparator)}');
     dir.createSync(recursive: true);
-    final target = File('${dir.path}${Platform.pathSeparator}$name');
+    final target = File('${dir.path}${Platform.pathSeparator}'
+        '${sanitizeOutputFileName(name)}');
 
     // 安全落位（同名覆盖）：旧文件先改名为 .bak → 再把新文件移入 → 成功后删 .bak；
     // 任一步失败都尽量把旧文件还原，避免"旧文件已删、新文件没写成"的窗口。
@@ -112,12 +122,14 @@ class DirectoryOutputTarget implements OutputTarget {
     }
     try {
       try {
-        source.renameSync(target.path);
+        // 用异步 API：跨卷（缓存盘 → 输出盘）时会退化为整份拷贝，
+        // 同步 copy 会把 UI 卡住几分钟（并行修复时还会拖住别的任务的
+        // 进度回调）。rename / copy / delete 都有对应的异步版本。
+        await source.rename(target.path);
       } on FileSystemException {
         // 跨卷（例如缓存盘 → 目标盘）rename 会失败：退回复制
-
-        source.copySync(target.path);
-        source.deleteSync();
+        await source.copy(target.path);
+        await source.delete();
       }
     } catch (e) {
       if (backup != null && backup.existsSync()) {
@@ -155,13 +167,14 @@ class SafOutputTarget implements OutputTarget {
 
   @override
   Future<String> save(File source, String name, {String subDir = ''}) async {
+    final safeName = sanitizeOutputFileName(name);
     await AndroidPlatform.writeToTree(
       treeUri: treeUri,
-      name: name,
+      name: safeName,
       sourcePath: source.path,
       relativeDir: subDir,
     );
-    return subDir.isEmpty ? name : '$subDir/$name';
+    return subDir.isEmpty ? safeName : '$subDir/$safeName';
   }
 }
 
@@ -184,7 +197,7 @@ class DownloadsOutputTarget implements OutputTarget {
   @override
   Future<String> save(File source, String name, {String subDir = ''}) =>
       AndroidPlatform.saveToDownloads(
-        name: name,
+        name: sanitizeOutputFileName(name),
         sourcePath: source.path,
         relativeDir: subDir,
       );

@@ -86,7 +86,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
   状态机 / 进度 / 取消 / 修复记录仍留在原来的调用方。每个文件依然先写独立缓存产物、
   校验通过才落位；「停止」会杀掉所有在跑的修复 Isolate。
 
-## 测试（192 项，`flutter test`）
+## 测试（198 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -100,11 +100,11 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 | `fragmented_test.dart` | **分片 MP4**：检测分类 / 无损扁平化（逐样本比对，含 moov 表 + 分片混合写法）/ 距离改进 / 取消 / 截断 |
 | `android_prefetch_test.dart` | Android 只读预取协议：区间解析后直接检测；`not_seekable` 正确降级；`deviceProfile` 低内存 / 核数解析与失败回退 |
 | `default_gateway_test.dart` | 默认网关：`/proc/net/route` / `ip route` / Windows `route print` / macOS + Android 平台通道降级 |
-| `parallel_test.dart` | 并行底座：并行度上限 / 按序启动 / 取消后不再启动 / 单个失败不拖垮整批 / 滑动窗口 / 任务池动态投递子任务 |
-| `parallel_pipeline_test.dart` | 并行端到端：WebDAV 6 文件扫描与修复 / 本地 5 文件修复 / **客户端侧请求确实同时在途** / 取消不入列表 |
+| `parallel_test.dart` | 并行底座：并行度上限 / 按序启动 / 取消后不再启动 / 单个失败不拖垮整批 / 滑动窗口 / 任务池动态投递子任务 / 信号量 |
+| `parallel_pipeline_test.dart` | 并行端到端：WebDAV 6 文件扫描与修复 / 保存到本地保留子目录且同名不覆盖 / 本地 5 文件修复 / **客户端侧请求确实同时在途** / 取消不入列表 |
 | `webdav_test.dart` | WebDAV 端到端 13 项（中文/空格路径、Range 降级、认证、取消、分片 MP4 远程检测与修复、产物字节校验…） |
 | `webdav_util_test.dart` | URL 工具 + **服务端提前断开时识别"下载不完整"** |
-| `output_target_test.dart` | 落位安全：同名覆盖 / **失败还原旧文件** / 自动建目录 / 记录用位置信息 |
+| `output_target_test.dart` | 落位安全：同名覆盖 / **失败还原旧文件** / 自动建目录 / 记录用位置信息 / 文件名与子目录的 `.`、`..` 越界防护 |
 | `name_rule_test.dart` | 命名规则：原名 / 前缀 / 后缀 / 非法字符 / 设置往返 |
 | `repair_ledger_test.dart` | 修复记录：指纹 / 存盘载入 / 淘汰 / 坏文件容错 |
 | `job_filter_test.dart` | 状态与筛选分组（待处理 / 待优化 / 正常 / 问题 / 已完成） |
@@ -121,7 +121,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（192 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
+flutter test                     # 全部测试（198 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -136,7 +136,7 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 192 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 198 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
 
 ## 本版要点（v2.9.0 · 并行：不再一个文件一个文件地等）
@@ -145,17 +145,20 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 耗时并不在计算上，而在**等**：等磁盘、等 SAF provider、等 HTTP 往返。
 这一版给每条流水线加了「最多 N 个同时进行」：
 
-- **本地 / 文件夹扫描**：同时检测（桌面 4 / Android 3）。已修复过的文件仍然在
-  检测前就按记录跳过；
-- **本地 / 文件夹修复**：同时修复（桌面 3 / Android 2）。每个文件依然先写独立
-  缓存产物 → 校验大小与结构 → 才允许落位，数据安全不变量不变；
+- **本地 / 文件夹扫描**：同时检测（自动，桌面最多 4 / Android 最多 3）。
+  已修复过的文件仍然在检测前就按记录跳过；
+- **本地 / 文件夹修复**：同时修复（自动，桌面最多 3 / Android 最多 2）。
+  每个文件依然先写独立缓存产物 → 校验大小与结构 → 才允许落位，数据安全不变量不变；
 - **WebDAV 扫描**：文件级并行 + 目录列举并行（3 路）+ **大盒分块并发** ——
   `moov`/`moof` 的剩余字节按 256KB、最多 4 路取回，5MB 的 moov 从约 320 次
   串行 Range 请求降到约 20 次；目录遍历与文件检测互相重叠；
 - **WebDAV 修复**：下载 → 修复 → 上传形成流水线，A 在上传时 B 已经在下一条下载；
+  「保存到本地」会保留远端子目录，不同目录下的同名文件不再互相覆盖；
 - **设置 → 性能**：自动 / 1 / 2 / 3 / 4；选 1 即回到旧的串行行为；
+- 底部状态条在并行时显示「N 个并行」；
 - **停止**：并行后登记**所有**在跑的修复 Isolate，一次全部杀掉；SAF 写入的取消
-  标记从布尔值改成「代数」，多个写入不会互相擦除取消状态。
+  标记从布尔值改成「代数」，并且批量开始时固定这一批的代数 —— 停止之后才开始的
+  写入也会立刻中止；
 
 ### Android 16+（API 36/37）
 

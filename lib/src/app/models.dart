@@ -221,7 +221,9 @@ String describeError(Object e) {
 String relativeDirOf(String displayPath) {
   final parts = displayPath
       .split(RegExp(r'[\\/]'))
-      .where((p) => p.isNotEmpty)
+      // 过滤 `.` / `..`：本地文件系统不会有这种目录名，但 WebDAV 服务器
+      // 返回的 entry.name 是外部输入 —— 不能让 `../` 把产物写出输出目录。
+      .where((p) => p.isNotEmpty && p != '.' && p != '..')
       .toList(growable: false);
   if (parts.length <= 1) return '';
   return parts.sublist(0, parts.length - 1).join('/');
@@ -431,6 +433,19 @@ String applyNameRule(
   base = sanitizeNamePart(base);
   if (base.isEmpty) return fileName;
   return '$base$ext';
+}
+
+/// 规范化输出文件名：**只取最后一段**，去掉控制字符与首尾空白。
+///
+/// WebDAV 的 `entry.name`、`displayPath` 都是外部输入，可能包含 `/`、`\` 或
+/// `..`。这些字符串最终会拼到本地路径 / SAF 文档名里 —— 绝不能让它改变目录。
+String sanitizeOutputFileName(String raw) {
+  final leaf = raw.split(RegExp(r'[/\\]')).last;
+  final cleaned = leaf.replaceAll(RegExp(r'[\x00-\x1f]'), '').trim();
+  if (cleaned.isEmpty || cleaned == '.' || cleaned == '..') {
+    return 'output.mp4';
+  }
+  return cleaned;
 }
 
 /// 应用设置（可持久化）。

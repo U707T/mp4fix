@@ -100,6 +100,29 @@ class AndroidPlatform {
     return (size: size, ranges: ranges);
   }
 
+  /// 批量写入使用的取消代数（Android 平台侧）。
+  ///
+  /// 在批量开始时向平台要一次当前代数，这一批里的所有写入都带着它。
+  /// 「停止」会把平台代数 +1 —— 即使是停止之后才**开始**的写入（并行时
+  /// 很常见：一个任务刚拿到槽位），也会立刻中止，而不是把几 GB 文件复制完。
+  /// 新批量会重新取一次代数，不受上一批取消的影响。
+  static int? _batchWriteEpoch;
+
+  /// 开始一个批量写入批次（Android；其它平台由调用方保证不调用）。
+  static Future<void> beginWriteBatch() async {
+    // 先清空：新批次在拿到代数之前若就开始写，应使用「当前代数」，
+    // 绝不能沿用上一批（上一批可能已经被取消，代数对不上会误判为取消）。
+    _batchWriteEpoch = null;
+    try {
+      _batchWriteEpoch = await _channel.invokeMethod<int>('writeEpoch');
+    } catch (_) {
+      _batchWriteEpoch = null;
+    }
+  }
+
+  /// 结束当前批量（之后的新写入恢复「取当前代数」的旧行为）。
+  static void endWriteBatch() => _batchWriteEpoch = null;
+
   /// 把 [sourcePath] 写入 SAF 文件夹 [treeUri]，覆盖同名文件。
   /// 返回写入后的文档 URI。
   ///
@@ -121,6 +144,7 @@ class AndroidPlatform {
         'name': name,
         'sourcePath': sourcePath,
         if (relativeDir.isNotEmpty) 'relativeDir': relativeDir,
+        if (_batchWriteEpoch != null) 'epoch': _batchWriteEpoch,
       });
     } on PlatformException catch (e) {
       if (e.code == SafWriteCancelledException.code) {
@@ -142,6 +166,7 @@ class AndroidPlatform {
     final result = await _channel.invokeMethod<String>('copyToCache', {
       'uri': uri,
       'name': name,
+      if (_batchWriteEpoch != null) 'epoch': _batchWriteEpoch,
     });
     if (result == null || result.isEmpty) {
       throw StateError('复制失败（平台未返回路径）');
@@ -161,6 +186,7 @@ class AndroidPlatform {
       'name': name,
       'sourcePath': sourcePath,
       if (relativeDir.isNotEmpty) 'relativeDir': relativeDir,
+      if (_batchWriteEpoch != null) 'epoch': _batchWriteEpoch,
     });
     if (result == null || result.isEmpty) {
       throw StateError('保存失败（平台未返回路径）');

@@ -265,6 +265,7 @@ class WebDavFixer {
       await client.upload(
         target,
         fixedFile,
+        isCancelled: isCancelled,
         onProgress: (done, total) {
           if (total > 0) onPhase?.call('上传中', 0.75 + done / total * 0.2);
         },
@@ -296,11 +297,13 @@ class WebDavFixer {
     } on RepairCancelledException {
       return _cancelledResult();
     } catch (e) {
-      if (cancelled()) return _cancelledResult();
-      // 上传中途失败时清理服务器上的半成品
-      if (uploadingTarget != null && !cancelled()) {
+      // 上传失败 / 取消：服务器上的半成品要清掉。`uploadingTarget` 是本次
+      // 新建的唯一名字，删除它不会碰到原文件；以前取消时直接 return，
+      // 半截的 `_fixed.mp4` 会永久留在服务器上。
+      if (uploadingTarget != null) {
         await _quietDelete(uploadingTarget);
       }
+      if (cancelled()) return _cancelledResult();
       return FixResult(
         ok: false,
         cancelled: false,

@@ -216,11 +216,13 @@ class WebDavClient {
     String url,
     File file, {
     void Function(int sent, int total)? onProgress,
+    bool Function()? isCancelled,
   }) async {
     final r = await _send('PUT', url,
         headers: const {'Content-Type': 'application/octet-stream'},
         bodyFile: file,
-        onUpload: onProgress);
+        onUpload: onProgress,
+        isCancelled: isCancelled);
     final text = await _readText(r.response, limit: 512);
     if (!_isSuccess(r.status)) {
       throw WebDavException('上传失败 HTTP ${r.status}${_suffix(text)}');
@@ -324,6 +326,7 @@ class WebDavClient {
     List<int>? body,
     File? bodyFile,
     void Function(int sent, int total)? onUpload,
+    bool Function()? isCancelled,
   }) async {
     var current = url;
     var redirects = 0;
@@ -359,6 +362,13 @@ class WebDavClient {
           request.headers.contentLength = total;
           var sent = 0;
           await for (final chunk in bodyFile.openRead()) {
+            // 并行修复时可能有 2~3 个上传在跑；「停止」要能立刻断开。
+            // 光 throw 不 abort 的话请求会挂在连接池里，直到超时才回收。
+            if (isCancelled?.call() ?? false) {
+              final cancelled = WebDavException('已取消');
+              request.abort(cancelled);
+              throw cancelled;
+            }
             request.add(chunk);
             sent += chunk.length;
             onUpload?.call(sent, total);

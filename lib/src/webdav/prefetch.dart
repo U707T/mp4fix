@@ -127,7 +127,7 @@ Future<PrefetchedSeekableInput> prefetchForInspect(
   WebDavClient client,
   String url, {
   required int fileSize,
-  int maxMoovBytes = 256 << 20,
+  int maxMoovBytes = 64 << 20,
   int maxMoofBytes = 64 << 20,
   int maxFragments = 20000,
   int windowBytes = 16 << 10,

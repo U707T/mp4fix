@@ -37,6 +37,12 @@ void main() {
       expect(relativeDirOf(r'sub\dir\a.mp4'), 'sub/dir');
       expect(relativeDirOf('/sub/a.mp4'), 'sub');
     });
+
+    test('过滤 . / ..（WebDAV 外部路径不能越界）', () {
+      expect(relativeDirOf('../a.mp4'), '');
+      expect(relativeDirOf('sub/../../a.mp4'), 'sub');
+      expect(relativeDirOf('sub/./a.mp4'), 'sub');
+    });
   });
 
   group('DirectoryOutputTarget 带子目录', () {

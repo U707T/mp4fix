@@ -1,12 +1,17 @@
 import 'dart:async';
 import 'dart:collection';
 
-/// 并行处理的两个小底座（本地检测 / 本地修复 / WebDAV 扫描与修复共用）。
+/// 并行处理的底座（本地检测 / 本地修复 / WebDAV 扫描与修复共用）。
 ///
 /// 这些流水线原来都是「一个文件接一个文件」的 for 循环。真正耗时的部分
 /// （读磁盘、等 SAF provider、HTTP 往返）大部分时间在**等**，串行执行等于
 /// 让 CPU、磁盘和网络互相排队。这里只做「最多 N 个同时进行」，业务语义
 /// （状态机、进度、取消、修复记录）仍留在原来的调用方。
+///
+/// - [forEachBounded]：固定列表，最多 N 个同时跑；
+/// - [ParallelWindow]：边发现边投递，窗口满时等一个完成；
+/// - [TaskPool]：任务可继续投递子任务（目录遍历），投递不阻塞；
+/// - [Semaphore]：限制某类任务的同时执行数，且能返回结果。
 
 /// 有界并发执行 [items] 中的任务。
 ///
@@ -92,6 +97,41 @@ class ParallelWindow {
   Future<void> drain() async {
     while (_active.isNotEmpty) {
       await Future.wait(_active.toList(growable: false));
+    }
+  }
+}
+
+/// 计数信号量：限制某类任务的同时执行数，但允许任务返回结果。
+///
+/// [ParallelWindow] 只适合「投递后不需要结果」的场景；整档下载降级需要
+/// 返回值，而且希望限制在 2 路（服务器不支持 Range 时，4 个 2GB 文件
+/// 同时下载会瞬间吃掉大量临时空间）。
+class Semaphore {
+  Semaphore(int permits) : _free = permits < 1 ? 1 : permits;
+
+  int _free;
+  final Queue<Completer<void>> _waiters = Queue();
+
+  /// 当前可用许可数（调试 / 测试用）。
+  int get available => _free;
+
+  Future<T> run<T>(Future<T> Function() task) async {
+    if (_free > 0) {
+      _free--;
+    } else {
+      final waiter = Completer<void>();
+      _waiters.add(waiter);
+      await waiter.future;
+      // 许可由释放方直接转交，这里不再增减
+    }
+    try {
+      return await task();
+    } finally {
+      if (_waiters.isNotEmpty) {
+        _waiters.removeFirst().complete();
+      } else {
+        _free++;
+      }
     }
   }
 }

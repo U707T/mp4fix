@@ -92,6 +92,10 @@ class MainActivity : FlutterActivity() {
                 cancelEpoch.incrementAndGet()
                 result.success(null)
             }
+
+            // 批量开始时向平台要一次当前取消代数，之后这一批的写入都带着它：
+            // 停止之后才开始的拷贝也会立刻中止（并行时的任务切换窗口）。
+            "writeEpoch" -> result.success(cancelEpoch.get())
             "writeToTree" -> {
                 val tree = call.argument<String>("treeUri")?.let(Uri::parse)
                 val name = call.argument<String>("name")
@@ -101,8 +105,9 @@ class MainActivity : FlutterActivity() {
                     return
                 }
                 val relativeDir = call.argument<String>("relativeDir")
+                val epoch = call.argument<Number>("epoch")?.toLong()
                 runInBackground(result) {
-                    writeToTree(tree, name, File(sourcePath), relativeDir).toString()
+                    writeToTree(tree, name, File(sourcePath), relativeDir, epoch).toString()
                 }
             }
 
@@ -113,7 +118,8 @@ class MainActivity : FlutterActivity() {
                     result.error("bad_args", "缺少 uri", null)
                     return
                 }
-                runInBackground(result) { copyToCache(uri, name) }
+                val epoch = call.argument<Number>("epoch")?.toLong()
+                runInBackground(result) { copyToCache(uri, name, epoch) }
             }
 
             "prefetchForInspect" -> {
@@ -133,7 +139,10 @@ class MainActivity : FlutterActivity() {
                     return
                 }
                 val relativeDir = call.argument<String>("relativeDir")
-                runInBackground(result) { saveToDownloads(name, File(sourcePath), relativeDir) }
+                val epoch = call.argument<Number>("epoch")?.toLong()
+                runInBackground(result) {
+                    saveToDownloads(name, File(sourcePath), relativeDir, epoch)
+                }
             }
 
             "deleteDocument" -> {
@@ -359,6 +368,7 @@ class MainActivity : FlutterActivity() {
         name: String,
         source: File,
         relativeDir: String? = null,
+        batchEpoch: Long? = null,
     ): Uri {
         val resolver = contentResolver
         // 递归扫描文件夹时产物要落回原子目录。目录按需创建；建不出来就**报错**，
@@ -366,7 +376,7 @@ class MainActivity : FlutterActivity() {
         val parent = resolveParent(tree, relativeDir)
         val partName = "$name.mp4fix-part"
         val backupName = "$name.mp4fix-bak"
-        val epoch = cancelEpoch.get()
+        val epoch = batchEpoch ?: cancelEpoch.get()
 
         // ---- 1) 写 .part（此时原文件还没被碰过，失败也不影响它）----
         val partUri = findChild(tree, parent, partName)
@@ -596,12 +606,19 @@ class MainActivity : FlutterActivity() {
         for (segment in relativeDir.split('/', '\\')) {
             if (segment.isBlank() || segment == ".") continue
             if (segment == "..") throw IOException("拒绝写入上级目录（$relativeDir）")
-            val existing = findChild(tree, current, segment)
-            current = existing
-                ?: runCatching { createDirectory(tree, current, segment) }.getOrNull()
-                ?: throw IOException(
-                    "无法在所选文件夹创建子目录「$segment」（该存储可能不支持建目录）"
-                )
+            var next = findChild(tree, current, segment)
+            if (next == null) {
+                // 并行修复时可能有两个任务同时写到同一个**新建**子目录：
+                // 一个先建成，另一个的 createDirectory 就会失败。这里失败后
+                // 再查一次 —— 别人建好了同样算成功，不能因此判这个文件保存失败。
+                val created = runCatching {
+                    createDirectory(tree, current, segment)
+                }.getOrNull()
+                next = created ?: findChild(tree, current, segment)
+            }
+            current = next ?: throw IOException(
+                "无法在所选文件夹创建子目录「$segment」（该存储可能不支持建目录）"
+            )
         }
         return current
     }
@@ -695,9 +712,10 @@ class MainActivity : FlutterActivity() {
         name: String,
         source: File,
         relativeDir: String? = null,
+        batchEpoch: Long? = null,
     ): String {
         val resolver = contentResolver
-        val epoch = cancelEpoch.get()
+        val epoch = batchEpoch ?: cancelEpoch.get()
         val relDir = mediaRelDir(relativeDir)
         if (Build.VERSION.SDK_INT >= 29) {
             val existing = findDownload(name, relativeDir)
@@ -757,7 +775,15 @@ class MainActivity : FlutterActivity() {
     /** 下载目录的相对路径（MediaStore 要求以 `/` 结尾）。 */
     private fun mediaRelDir(relativeDir: String?): String {
         val base = Environment.DIRECTORY_DOWNLOADS + "/MP4Fix"
-        val sub = relativeDir?.trim()?.replace('\\', '/')?.trim('/') ?: ""
+        // 过滤空段与 `.` / `..`：相对目录可能来自 WebDAV 的远端目录名，
+        // 不能让 MediaStore 的 RELATIVE_PATH 被 `..` 带出 MP4Fix 目录。
+        val sub = relativeDir
+            ?.trim()
+            ?.replace('\\', '/')
+            ?.split('/')
+            ?.filter { it.isNotBlank() && it != "." && it != ".." }
+            ?.joinToString("/")
+            ?: ""
         return if (sub.isEmpty()) "$base/" else "$base/$sub/"
     }
 
@@ -936,11 +962,15 @@ class MainActivity : FlutterActivity() {
 
     // ---------------------------------------------------------------- 输入复制
 
-    private fun copyToCache(uri: Uri, name: String): String {
+    private fun copyToCache(
+        uri: Uri,
+        name: String,
+        batchEpoch: Long? = null,
+    ): String {
         val dir = File(cacheDir, "imports").apply { mkdirs() }
         val safeName = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(120)
         val out = File(dir, "${System.nanoTime()}-$safeName")
-        val epoch = cancelEpoch.get()
+        val epoch = batchEpoch ?: cancelEpoch.get()
         try {
             contentResolver.openInputStream(uri)?.use { input ->
                 out.outputStream().buffered(1 shl 20).use { o -> copyCancellable(input, o, epoch) }
@@ -955,7 +985,7 @@ class MainActivity : FlutterActivity() {
 
     companion object {
         private const val CHANNEL = "mp4fix/platform"
-        private const val MAX_MOOV = 256L shl 20 // 预取 moov 上限 256MB
+        private const val MAX_MOOV = 64L shl 20 // 预取 moov 上限 64MB（并行扫描时内存 × 并发数）
         private const val MAX_MOOF = 64L shl 20 // 单个 moof 上限 64MB
         private const val MAX_FRAGMENTS = 20000 // 预取 moof 个数上限
         private const val MAX_BOX_COUNT = 50000 // 盒扫描保护上限

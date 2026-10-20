@@ -133,4 +133,34 @@ void main() {
     await expectLater(pool.idle(), throwsStateError);
     expect(done, [0, 1, 3, 4]);
   });
+
+  test('Semaphore：最多 N 个同时执行，且能拿到返回值', () async {
+    final gate = Semaphore(2);
+    var active = 0;
+    var maxActive = 0;
+    final results = await Future.wait([
+      for (var i = 0; i < 6; i++)
+        gate.run(() async {
+          active++;
+          if (active > maxActive) maxActive = active;
+          await Future<void>.delayed(const Duration(milliseconds: 3));
+          active--;
+          return i * 10;
+        }),
+    ]);
+
+    expect(maxActive, 2);
+    expect(results, [0, 10, 20, 30, 40, 50]);
+    expect(gate.available, 2);
+  });
+
+  test('Semaphore：任务抛错也会释放许可（不会永久卡死）', () async {
+    final gate = Semaphore(1);
+    await expectLater(
+      gate.run(() async => throw StateError('boom')),
+      throwsStateError,
+    );
+    expect(gate.available, 1);
+    expect(await gate.run(() async => 42), 42);
+  });
 }

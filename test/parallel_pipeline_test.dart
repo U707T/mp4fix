@@ -19,6 +19,9 @@ class _CountingClient extends WebDavClient {
   int _active = 0;
   int maxActive = 0;
 
+  int _activeDownloads = 0;
+  int maxDownloads = 0;
+
   Future<T> _track<T>(Future<T> Function() task) async {
     _active++;
     if (_active > maxActive) maxActive = _active;
@@ -35,13 +38,22 @@ class _CountingClient extends WebDavClient {
     File dest, {
     void Function(int done, int total)? onProgress,
     bool Function()? isCancelled,
-  }) =>
-      _track(() => super.download(
-            url,
-            dest,
-            onProgress: onProgress,
-            isCancelled: isCancelled,
-          ));
+  }) async {
+    _activeDownloads++;
+    if (_activeDownloads > maxDownloads) maxDownloads = _activeDownloads;
+    try {
+      return await _track(
+        () => super.download(
+          url,
+          dest,
+          onProgress: onProgress,
+          isCancelled: isCancelled,
+        ),
+      );
+    } finally {
+      _activeDownloads--;
+    }
+  }
 
   @override
   Future<Uint8List> getRange(String url, int start, int endInclusive) =>
@@ -160,6 +172,7 @@ void main() {
       );
 
       client.maxActive = 0;
+      client.maxDownloads = 0;
       await WebDavScanner(
         client,
         threshold: 20000,
@@ -169,6 +182,11 @@ void main() {
         client.maxActive,
         greaterThan(1),
         reason: 'fileConcurrency=4 时请求应真的叠起来，否则并行只是写在注释里',
+      );
+      expect(
+        client.maxDownloads,
+        lessThanOrEqualTo(2),
+        reason: '整档下载降级最多 2 路（临时空间闸门）',
       );
     } finally {
       client.close();
@@ -206,6 +224,48 @@ void main() {
       );
     }
     expect(c.lastNotice, contains('修复完成 6 个'));
+  });
+
+  test('WebDAV 保存到本地：保留子目录，跨目录同名文件不互相覆盖', () async {
+    // 再建一个子目录，放一个与 sub/bad1.mp4 同名的文件
+    Directory('${root.path}/sub2').createSync();
+    File('test/fixtures/bad_interleave.mp4')
+        .copySync('${root.path}/sub2/bad1.mp4');
+    final out = Directory('${cache.path}/webdav-out')..createSync();
+
+    final c = AppController();
+    c.settings.webdav.host = server.baseUrl;
+    c.settings.webdav.port = '';
+    c.settings.webdav.path = '';
+    c.settings.thresholdMb = 0;
+    c.settings.thresholdSeconds = 0;
+    c.settings.outputDirPath = out.path;
+    c.settings.parallelism = 3;
+
+    await c.scanWebDav(fixAfterScan: false);
+    final jobs = c.jobsOf(JobSource.webdav);
+    expect(jobs, hasLength(7));
+    expect(
+      jobs.firstWhere((j) => j.displayPath == 'sub/bad1.mp4').relDir,
+      'sub',
+      reason: '扫描时就要记下远端子目录，否则保存到本地会拍平',
+    );
+
+    await c.fixWebDavJobs(uploadCopies: false);
+
+    expect(
+      jobs.map((j) => j.status).toSet(),
+      {JobStatus.saved},
+      reason: jobs.map((j) => '${j.name}: ${j.message}').join('\n'),
+    );
+    expect(File('${out.path}/sub/bad1.mp4').existsSync(), isTrue);
+    expect(File('${out.path}/sub2/bad1.mp4').existsSync(), isTrue);
+    expect(File('${out.path}/bad0.mp4').existsSync(), isTrue);
+    expect(
+      File('${out.path}/bad1.mp4').existsSync(),
+      isFalse,
+      reason: '根目录多出一份会掩盖「同名文件互相覆盖」的问题',
+    );
   });
 
   test('本地文件夹并行修复：5 个文件全部落位到输出目录', () async {
