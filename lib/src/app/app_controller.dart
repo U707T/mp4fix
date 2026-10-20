@@ -778,6 +778,26 @@ class AppController extends ChangeNotifier {
   /// 会变成 `同名.mp4` —— 在「就地覆盖输入文件夹」模式下，产物名和原文件对不上，
   /// 结果是**原 `.mov` 没被替换，反而多出一个 `.mp4`**，用户看到的就是
   /// 「修完了但文件夹里多了一堆文件、原文件还是卡的」。
+  /// 输出路径归一化（大小写不敏感 + 统一分隔符），用于重名判定。
+  static String _outputKey(String relativePath) =>
+      relativePath.replaceAll('\\', '/').toLowerCase();
+
+  /// 修复记录里「已经属于别的源文件」的输出名 → 源指纹。
+  ///
+  /// 只取同一输出位置、同一命名规则的记录；重做单个文件时，分配器靠它
+  /// 避开同批其他文件的产物。
+  Map<String, String> _reservedOutputNames(OutputTarget output) {
+    final reserved = <String, String>{};
+    for (final record in ledger.records) {
+      if (record.rule != settings.nameRuleId) continue;
+      if (record.kind != output.ledgerKind || record.ref != output.ledgerRef) {
+        continue;
+      }
+      reserved[_outputKey(record.out)] = record.key;
+    }
+    return reserved;
+  }
+
   String _outputName(FixJob job) {
     final dot = job.name.lastIndexOf('.');
     if (dot <= 0 || dot == job.name.length - 1) {
@@ -1702,11 +1722,30 @@ class AppController extends ChangeNotifier {
   }
 
   /// WebDAV 整批修复使用的模式（上传副本 / 保存到本地），供「重试」沿用。
+  ///
+  /// 这是**唯一状态源**：页面上的分段按钮通过 [setWebDavUploadCopies] 改它，
+  /// 所有「修复全部 / 全部处理 / 扫描并修复」都读它。以前页面自己存了一份
+  /// `_uploadCopies`，而底部按钮调的是 `fixWebDavJobs()`（不带参数）——
+  /// 选了「保存到本地」仍然按上一次扫描的默认值上传副本。
   bool webDavUploadCopies = true;
 
+  /// 切换 WebDAV 输出模式（页面按钮用；会通知界面刷新）。
+  void setWebDavUploadCopies(bool value) {
+    if (webDavUploadCopies == value) return;
+    webDavUploadCopies = value;
+    notifyListeners();
+  }
+
   /// 扫描 WebDAV 目录（可选修复）。
-  Future<void> scanWebDav({bool fixAfterScan = false, bool uploadCopies = true}) async {
+  ///
+  /// [uploadCopies] 为空时沿用当前模式 ——「仅扫描」不能把用户刚选的
+  /// 「保存到本地」重置回「上传副本」。
+  Future<void> scanWebDav({
+    bool fixAfterScan = false,
+    bool? uploadCopies,
+  }) async {
     if (running) return;
+    if (uploadCopies != null) webDavUploadCopies = uploadCopies;
     // ★ 重新扫描前清掉上一轮的 WebDAV 任务。
     //   v2.7.0 修过「文件夹重复扫描把列表翻倍」，但**同样的问题在 WebDAV 这侧
     //   一直没修**：同一个目录点两次「仅扫描」，条目变两倍，「扫描并修复」会把
@@ -1758,9 +1797,8 @@ class AppController extends ChangeNotifier {
       client.close();
       _setRunning(null);
     }
-    webDavUploadCopies = uploadCopies;
     if (fixAfterScan && !_cancelRequested) {
-      await fixWebDavJobs(uploadCopies: uploadCopies);
+      await fixWebDavJobs();
     } else {
       final summary = _scanSummary(jobsOf(JobSource.webdav));
       if (summary.isNotEmpty) lastNotice = summary;
@@ -1803,6 +1841,10 @@ class AppController extends ChangeNotifier {
       final parallel = repairParallelism;
       // 与本地修复共用同一套「缓存预算」：WebDAV 下载 + 修复产物也是两份。
       final gate = WeightedSemaphore(parallel * 2);
+      // 「保存到本地」同样要防止同批产物重名（命名规则清洗后可能撞名）。
+      final names = output == null
+          ? OutputNameAllocator()
+          : OutputNameAllocator(reserved: _reservedOutputNames(output));
       var completed = 0;
       // 一个文件分「下载 → 修复 → 上传」三段，每段都在等网络 / 磁盘。
       // 同时跑几个文件，天然形成流水线：A 在上传时，B 已经在下一条下载。
@@ -1811,6 +1853,13 @@ class AppController extends ChangeNotifier {
         parallel,
         (job, _) async {
           if (_cancelRequested) return;
+          final localOutName = uploadCopies!
+              ? null
+              : names.allocate(
+                  job.relDir,
+                  sanitizeOutputFileName(settings.applyOutputName(job.name)),
+                  sourceKey: _jobLedgerKey(job),
+                );
           try {
             await gate.run(_repairWeight(job.size, parallel), () async {
               if (_cancelRequested) return;
@@ -1823,6 +1872,7 @@ class AppController extends ChangeNotifier {
                   fixer: fixer,
                   cache: cache,
                   output: output,
+                  localOutName: localOutName,
                 );
               } finally {
                 activeJobCount--;
@@ -1859,6 +1909,7 @@ class AppController extends ChangeNotifier {
     required WebDavFixer fixer,
     required Directory cache,
     required OutputTarget? output,
+    String? localOutName,
   }) async {
     final item = _webDavItems[job.id];
     if (item == null) {
@@ -1917,7 +1968,7 @@ class AppController extends ChangeNotifier {
           job.status = JobStatus.failed;
           job.message = '保存失败：没有可用的输出位置';
         } else {
-          final outName =
+          final outName = localOutName ??
               sanitizeOutputFileName(settings.applyOutputName(job.name));
           try {
             final saved = await output.save(
@@ -2011,6 +2062,12 @@ class AppController extends ChangeNotifier {
       // 缓存预算：每个文件最多同时占「输入副本 + 修复产物」两份，
       // 按 1GB 折算；大文件自动少开，避免 3 个 4GB 文件同时产生 24GB 临时数据。
       final gate = WeightedSemaphore(parallel * 2);
+      // 同一批里不同源文件可能被命名规则清洗成同一个目标名；
+      // 在开始等缓存闸门前先按顺序分配唯一名字，避免落位时互相覆盖。
+      // 修复记录里已有的归属也要避开（单独重做时不能覆盖同批其他文件）。
+      final names = OutputNameAllocator(
+        reserved: _reservedOutputNames(output),
+      );
       var completed = 0;
       // 修复是「读原片 + 写产物 + 落位」的长任务，串行时磁盘几乎一直半空转。
       // 并行度默认比扫描保守（见 repairParallelism）：每个文件都占一份缓存。
@@ -2019,6 +2076,11 @@ class AppController extends ChangeNotifier {
         parallel,
         (job, _) async {
           if (_cancelRequested) return;
+          final outName = names.allocate(
+            job.relDir,
+            _outputName(job),
+            sourceKey: _jobLedgerKey(job),
+          );
           try {
             await gate.run(_repairWeight(job.size, parallel), () async {
               if (_cancelRequested) return;
@@ -2027,6 +2089,7 @@ class AppController extends ChangeNotifier {
               try {
                 await _fixLocalJob(
                   job,
+                  outName: outName,
                   source: source,
                   output: output,
                   cache: cache,
@@ -2066,6 +2129,7 @@ class AppController extends ChangeNotifier {
   /// 修复单个本地 / 文件夹任务（输出落位、修复记录、取消语义都在这里）。
   Future<void> _fixLocalJob(
     FixJob job, {
+    required String outName,
     required JobSource source,
     required OutputTarget output,
     required Directory cache,
@@ -2104,7 +2168,6 @@ class AppController extends ChangeNotifier {
     job.message = '修复中…';
     notifyListeners();
 
-    final outName = _outputName(job);
     // 注意：**一律**先修复到缓存里的独立临时文件，再交给 OutputTarget 落位。
     // 不能直接写输出目录：若用户把"输出=输入"（就地覆盖，或同名文件），
     // 直写会一边读原文件一边截断它 —— 直接毁掉源文件。

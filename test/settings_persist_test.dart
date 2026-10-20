@@ -46,6 +46,8 @@ void main() {
     if (f.existsSync()) f.deleteSync();
     final tmp = File('${support.path}/settings.json.tmp');
     if (tmp.existsSync()) tmp.deleteSync();
+    final bak = File('${support.path}/settings.json.bak');
+    if (bak.existsSync()) bak.deleteSync();
   });
 
   tearDown(() {
@@ -101,6 +103,21 @@ void main() {
     expect(loaded, isNotNull);
     expect(loaded!.thresholdMb, 8, reason: '切后台时没补写 → 用户刚改的设置丢了');
     expect(loaded.nameSuffix, '_oops');
+  });
+
+  test('崩溃在「旧文件让位 → 新文件转正」窗口：从 .bak 读回上一份设置', () async {
+    File('${support.path}/settings.json').writeAsStringSync(
+      '{"thresholdMb": 2, "nameSuffix": "_old"}',
+    );
+    await SettingsStore.save(AppSettings(thresholdMb: 8, nameSuffix: '_new'));
+
+    // 模拟崩溃：新文件还没转正 / 丢了，只剩上一份 .bak
+    File('${support.path}/settings.json').deleteSync();
+
+    final loaded = await SettingsStore.load();
+    expect(loaded, isNotNull, reason: '不能因为一次崩溃就回默认值');
+    expect(loaded!.thresholdMb, 2);
+    expect(loaded.nameSuffix, '_old');
   });
 
   test('文件损坏时退回默认值而不是崩溃', () async {

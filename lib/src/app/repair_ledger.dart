@@ -145,6 +145,9 @@ class RepairLedger {
 
   int get length => _entries.length;
 
+  /// 全部记录（只读视图，供输出名分配 / 诊断使用）。
+  Iterable<RepairRecord> get records => _entries.values;
+
   RepairRecord? lookup(String key) => _entries[key];
 
   void put(RepairRecord record) {

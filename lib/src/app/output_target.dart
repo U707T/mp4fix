@@ -147,14 +147,27 @@ class DirectoryOutputTarget implements OutputTarget {
       } on FileSystemException {
         // 跨卷（例如缓存盘 → 目标盘）rename 会失败：退回复制
         await source.copy(target.path);
-        await source.delete();
+        // 产物已经是完整的新文件；临时文件删不掉不算保存失败（留给清理）
+        try {
+          await source.delete();
+        } catch (_) {
+          // 忽略：临时文件稍后由「清理临时文件」/ 启动清理处理
+        }
       }
     } catch (e) {
+      // 只有 rename / copy 失败才会到这里：target 可能是半截文件。
+      // 必须先删掉它 —— 否则 Windows 上 backup.renameSync(target) 会因
+      // 目标已存在而失败，用户的原文件就永久停在 `.mp4fix-bak`。
+      try {
+        if (target.existsSync()) target.deleteSync();
+      } catch (_) {
+        // 删不掉也要继续尝试还原
+      }
       if (backup != null && backup.existsSync()) {
         try {
           backup.renameSync(target.path);
         } catch (_) {
-          // 尽力而为
+          // 尽力而为：至少 .bak 还在，数据没丢
         }
       }
       rethrow;

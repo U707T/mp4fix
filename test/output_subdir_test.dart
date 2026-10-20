@@ -102,6 +102,64 @@ void main() {
     );
   });
 
+  test('命名规则把不同源文件清洗成同名 → 自动加序号；重做也不覆盖另一个', () async {
+    final root = Directory('${tmp.path}/collide-in')..createSync();
+    final out = Directory('${tmp.path}/collide-out')..createSync();
+    // Linux 上 `?` / `*` 是合法文件名字符；命名规则会把它清洗成同一个目标名。
+    // 用两个不同的坏夹具，产物字节不同 —— 这样「重做时覆盖了另一个」能被测出来。
+    File('test/fixtures/bad_interleave.mp4').copySync('${root.path}/a?.mp4');
+    File('test/fixtures/bad_interleave_v1mdhd.mp4')
+        .copySync('${root.path}/a*.mp4');
+
+    final c = AppController();
+    c.settings.scanInputDirPath = root.path;
+    c.settings.outputDirPath = out.path;
+    c.settings.nameMode = OutputNameMode.prefix;
+    c.settings.namePrefix = 'p_';
+    // 夹具的错位只有几十 KB；默认 4MB 阈值会判成「正常」，
+    // 这样 redo 重新检测后不会进入修复步骤，测不到分配器。
+    c.settings.thresholdMb = 0;
+    c.settings.thresholdSeconds = 0;
+
+    await c.scanFolder(fixAfterScan: false);
+    expect(c.jobsOf(JobSource.folder), hasLength(2));
+
+    await c.fixJobs(JobSource.folder, processAll: true);
+
+    final jobs = c.jobsOf(JobSource.folder);
+    final names = out
+        .listSync()
+        .whereType<File>()
+        .map((f) => f.uri.pathSegments.last)
+        .toSet();
+    expect(
+      names,
+      {'p_a.mp4', 'p_a_2.mp4'},
+      reason: '两个源文件清洗后同名，后一个必须加序号而不是覆盖：$names',
+    );
+    expect(c.lastNotice, contains('修复完成 2 个'));
+
+    // 单独重做拿到 `_2` 的那条：它必须继续用 `_2`，不能回头覆盖另一个。
+    final second = jobs.firstWhere(
+      (j) => j.outputPath?.endsWith('p_a_2.mp4') ?? false,
+    );
+    final firstPath = jobs
+        .firstWhere((j) => !identical(j, second))
+        .outputPath!;
+    final secondPath = second.outputPath!;
+    final firstBytes = File(firstPath).readAsBytesSync();
+
+    await c.redoJob(second);
+
+    expect(
+      File(firstPath).readAsBytesSync(),
+      firstBytes,
+      reason: '重做 B 覆盖了 A 的产物 —— 分配器没有参考修复记录',
+    );
+    expect(second.outputPath, secondPath);
+    expect(File(secondPath).existsSync(), isTrue);
+  });
+
   test('端到端：扫描带子目录的文件夹 → 产物落在对应子目录', () async {
     final root = Directory('${tmp.path}/in')..createSync();
     Directory('${root.path}/sub1').createSync();

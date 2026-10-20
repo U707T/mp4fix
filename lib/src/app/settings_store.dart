@@ -30,15 +30,21 @@ class SettingsStore {
   }
 
   static Future<AppSettings?> load() async {
-    try {
-      final file = await _file();
-      if (!file.existsSync()) return null;
-      final decoded = jsonDecode(await file.readAsString());
-      if (decoded is! Map) return null;
-      return AppSettings.fromJson(decoded.cast<String, Object?>());
-    } catch (_) {
-      return null;
+    final file = await _file();
+    // 主文件优先；损坏 / 缺失时回退到上一份 `.bak`。
+    // 这样「删旧文件 → 改名」之间崩溃（Windows 上 rename 不能覆盖）
+    // 也不会把全部设置丢回默认值。
+    for (final candidate in <File>[file, File('${file.path}.bak')]) {
+      try {
+        if (!candidate.existsSync()) continue;
+        final decoded = jsonDecode(await candidate.readAsString());
+        if (decoded is! Map) continue;
+        return AppSettings.fromJson(decoded.cast<String, Object?>());
+      } catch (_) {
+        // 试下一份
+      }
     }
+    return null;
   }
 
   static Future<void> save(AppSettings settings) {
@@ -69,13 +75,21 @@ class SettingsStore {
     try {
       final file = await _file();
       final tmp = File('${file.path}.tmp');
+      final bak = File('${file.path}.bak');
       await tmp.writeAsString(json, flush: true);
-      // 先删再改名：Windows 上 rename 不能覆盖已存在的文件
+      // 先把现有设置改名成 .bak（而不是直接删）：Windows 上 rename 不能
+      // 覆盖已存在的文件，所以只能「让位」；任何一步崩溃都能从 .bak 读回。
       if (file.existsSync()) {
         try {
-          file.deleteSync();
+          if (bak.existsSync()) bak.deleteSync();
+          file.renameSync(bak.path);
         } catch (_) {
-          // 删不掉就继续尝试改名，失败会被外层吞掉
+          // 改名失败（被占用等）→ 退回删除，至少让 tmp 有机会转正
+          try {
+            file.deleteSync();
+          } catch (_) {
+            // 删不掉就继续尝试改名，失败会被外层吞掉
+          }
         }
       }
       tmp.renameSync(file.path);

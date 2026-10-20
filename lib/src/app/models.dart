@@ -448,6 +448,46 @@ String sanitizeOutputFileName(String raw) {
   return cleaned;
 }
 
+/// 一批修复内的输出文件名分配器。
+///
+/// 命名规则会把不同源文件名清洗成同一个目标名（例如 `a?.mp4` / `a*.mp4`
+/// 去掉 Windows 非法字符后都是 `a.mp4`），并行落位时会互相覆盖。这里按
+/// 「子目录 + 文件名（大小写不敏感）」去重，冲突时加 `_2`、`_3`。
+///
+/// [reserved] 是「修复记录里已经属于别的源文件」的输出名（key 为输出路径，
+/// value 为源文件指纹）。重做单个文件时也要遵守这些归属，否则只重做 B 会
+/// 把 A 的产物覆盖掉。
+class OutputNameAllocator {
+  OutputNameAllocator({Map<String, String> reserved = const {}})
+      : _owners = {...reserved};
+
+  final Map<String, String> _owners;
+
+  String allocate(String subDir, String name, {String sourceKey = ''}) {
+    final dir = subDir.replaceAll('\\', '/').toLowerCase();
+    var candidate = name;
+    var n = 2;
+    while (true) {
+      // 与 repair_ledger 里的 `out`（`sub/name` 或 `name`）保持同一套键，
+      // 根目录不能多出前导斜杠，否则「记录里已有归属」永远匹配不上。
+      final key = dir.isEmpty
+          ? candidate.toLowerCase()
+          : '$dir/${candidate.toLowerCase()}';
+      final owner = _owners[key];
+      if (owner == null ||
+          (sourceKey.isNotEmpty && owner == sourceKey)) {
+        _owners[key] = sourceKey.isEmpty ? 'new:$key' : sourceKey;
+        return candidate;
+      }
+      final dot = name.lastIndexOf('.');
+      candidate = dot > 0
+          ? '${name.substring(0, dot)}_$n${name.substring(dot)}'
+          : '${name}_$n';
+      n++;
+    }
+  }
+}
+
 /// 应用设置（可持久化）。
 class AppSettings {
   AppSettings({

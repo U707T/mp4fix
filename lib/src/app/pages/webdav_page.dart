@@ -23,7 +23,6 @@ class _WebDavPageState extends State<WebDavPage> {
   late TextEditingController _user;
   late TextEditingController _pass;
   bool _seeded = false;
-  bool _uploadCopies = true;
   bool _gatewayLoading = false;
   JobFilter _filter = JobFilter.all;
   String _status = '';
@@ -314,13 +313,13 @@ class _WebDavPageState extends State<WebDavPage> {
                   label: Text('保存到本地'),
                 ),
               ],
-              selected: {_uploadCopies},
+              selected: {controller.webDavUploadCopies},
               onSelectionChanged: canRun
-                  ? (v) => setState(() => _uploadCopies = v.first)
+                  ? (v) => controller.setWebDavUploadCopies(v.first)
                   : null,
             ),
             Text(
-              _uploadCopies
+              controller.webDavUploadCopies
                   ? (copyExample == '示例.mp4'
                       ? '在服务器生成「原名_fixed.mp4」副本（原文件不动）'
                       : '在服务器生成「$copyExample」这样按命名规则的副本（原文件不动）')
@@ -345,7 +344,6 @@ class _WebDavPageState extends State<WebDavPage> {
                             });
                             await controller.scanWebDav(
                               fixAfterScan: true,
-                              uploadCopies: _uploadCopies,
                             );
                             if (mounted) {
                               setState(() {

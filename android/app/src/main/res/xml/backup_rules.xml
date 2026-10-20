@@ -6,5 +6,8 @@
 -->
 <full-backup-content>
     <exclude domain="file" path="settings.json" />
+    <exclude domain="file" path="settings.json.tmp" />
+    <exclude domain="file" path="settings.json.bak" />
     <exclude domain="file" path="repair_ledger.json" />
+    <exclude domain="file" path="repair_ledger.json.tmp" />
 </full-backup-content>

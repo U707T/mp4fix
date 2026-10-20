@@ -268,6 +268,49 @@ void main() {
     );
   });
 
+  test('WebDAV 保存到本地模式：仅扫描不重置，修复不再上传 fixed', () async {
+    final out = Directory('${cache.path}/mode-out')..createSync();
+    final c = AppController();
+    c.settings.webdav.host = server.baseUrl;
+    c.settings.webdav.port = '';
+    c.settings.webdav.path = '';
+    c.settings.thresholdMb = 0;
+    c.settings.thresholdSeconds = 0;
+    c.settings.outputDirPath = out.path;
+
+    c.setWebDavUploadCopies(false);
+    await c.scanWebDav(fixAfterScan: false);
+    expect(
+      c.webDavUploadCopies,
+      isFalse,
+      reason: '「仅扫描」不能把用户刚选的「保存到本地」重置回上传副本',
+    );
+
+    // 页面底部的「修复全部 / 全部处理」就是这样调的：不带模式参数
+    await c.fixWebDavJobs();
+
+    final jobs = c.jobsOf(JobSource.webdav);
+    expect(
+      jobs.map((j) => j.status).toSet(),
+      {JobStatus.saved},
+      reason: jobs.map((j) => '${j.name}: ${j.message}').join('\n'),
+    );
+    expect(
+      out.listSync(recursive: true).whereType<File>(),
+      hasLength(6),
+      reason: '保存到本地应产出 6 个文件（含子目录）',
+    );
+    expect(
+      root
+          .listSync(recursive: true)
+          .whereType<File>()
+          .where((f) => f.path.contains('_fixed'))
+          .toList(),
+      isEmpty,
+      reason: '选了「保存到本地」却仍在服务器上传了 _fixed 副本',
+    );
+  });
+
   test('本地文件夹并行修复：5 个文件全部落位到输出目录', () async {
     final input = Directory('${cache.path}/local-in')..createSync();
     final output = Directory('${cache.path}/local-out')..createSync();

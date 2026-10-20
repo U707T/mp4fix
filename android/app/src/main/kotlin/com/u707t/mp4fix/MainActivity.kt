@@ -86,6 +86,9 @@ class MainActivity : FlutterActivity() {
      */
     private val cancelEpoch = java.util.concurrent.atomic.AtomicLong(0)
 
+    /** 缓存文件序号：并行复制时避免同一纳秒撞名（同名不同目录的文件）。 */
+    private val cacheSeq = java.util.concurrent.atomic.AtomicLong(0)
+
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "cancelPlatformWrite" -> {
@@ -969,7 +972,7 @@ class MainActivity : FlutterActivity() {
     ): String {
         val dir = File(cacheDir, "imports").apply { mkdirs() }
         val safeName = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(120)
-        val out = File(dir, "${System.nanoTime()}-$safeName")
+        val out = File(dir, "${System.nanoTime()}-${cacheSeq.incrementAndGet()}-$safeName")
         val epoch = batchEpoch ?: cancelEpoch.get()
         try {
             contentResolver.openInputStream(uri)?.use { input ->

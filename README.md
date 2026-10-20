@@ -86,7 +86,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
   状态机 / 进度 / 取消 / 修复记录仍留在原来的调用方。每个文件依然先写独立缓存产物、
   校验通过才落位；「停止」会杀掉所有在跑的修复 Isolate。
 
-## 测试（200 项，`flutter test`）
+## 测试（203 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -121,7 +121,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（200 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
+flutter test                     # 全部测试（203 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -136,8 +136,18 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 200 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 203 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.9.2 · WebDAV 保存到本地修复）
+
+- **修复「保存到本地」不生效**：模式统一存进 `AppController`，页面按钮、修复全部、
+  全部处理、单条修复、重做共用同一个值；「仅扫描」也不会再把它重置成上传副本；
+- **设置保存更抗崩溃**：旧设置先让位成 `.bak`，新文件转正；主文件坏了 / 丢了
+  自动回退 `.bak`；
+- **备份排除**：`settings.json.tmp` / `.bak` 同样不进云备份 / 设备迁移；
+- **并行缓存 / 落位**：缓存副本加序号防撞名；跨卷拷贝失败先清半截目标再还原；
+  命名规则清洗后重名会自动加 `_2`，单独重做也不会覆盖同批其他文件。
 
 ## 本版要点（v2.9.1 · 并行收尾）
 
