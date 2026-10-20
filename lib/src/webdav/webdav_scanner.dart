@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import '../common/parallel.dart';
 import '../engine/engine.dart';
 import 'prefetch.dart';
 import 'webdav_client.dart';
@@ -43,6 +44,8 @@ class WebDavScanner {
     this.maxFiles = 100000,
     this.fallbackDownloadLimit = 2 << 30,
     this.maxMoovBytes = 256 << 20,
+    this.fileConcurrency = 4,
+    this.dirConcurrency = 3,
   });
 
   final WebDavClient client;
@@ -54,6 +57,19 @@ class WebDavScanner {
   final int maxFiles;
   final int fallbackDownloadLimit;
   final int maxMoovBytes;
+
+  /// 同时检测的文件数。
+  ///
+  /// 远程检测的耗时几乎全是「发一个 Range 请求 → 等往返 → 解析 → 再发」。
+  /// 串行时链路有一半时间在空转；同时跑 3~4 个文件就能把等待叠起来。
+  /// 同一时间对服务器只有几个小请求，负担远小于整档下载。
+  final int fileConcurrency;
+
+  /// 同时列举的目录数。
+  ///
+  /// 「一目录一两个文件」的素材库（按剧集 / 日期分目录很常见）里，
+  /// PROPFIND 的往返才是大头。3 路并发对家用 NAS 很温和。
+  final int dirConcurrency;
 
   /// 参与检测的扩展名。
   static const Set<String> videoExtensions = {'mp4', 'm4v', 'mov'};
@@ -69,6 +85,12 @@ class WebDavScanner {
   /// Range 支持探测结果（首个文件时确定一次）。
   bool? _rangeSupport;
 
+  /// 降级下载的临时文件序号。
+  ///
+  /// 并行扫描时会有多个文件同时走「整档下载」回退；只按时间戳命名在
+  /// 时钟精度粗的平台（1ms）上可能撞名 —— 两个文件互相覆盖，检测结果就串了。
+  static int _probeSeq = 0;
+
   /// 扫描 [rootUrl] 下的全部视频文件；每个文件完成检测后回调 [onFile]。
   ///
   /// [tempDir]：不支持 Range 时的本地临时目录（需可写）。
@@ -81,29 +103,45 @@ class WebDavScanner {
   }) async {
     final results = <ScanItem>[];
     final visited = <String>{};
-    final stack = <({String url, String relPath})>[
-      (url: client.ensureTrailingSlash(rootUrl), relPath: ''),
-    ];
     var fileCount = 0;
+    var stopped = false;
+
+    // 文件是边遍历目录边发现的：用滑动窗口把「已发现但还没检测完」的文件
+    // 控制在 fileConcurrency 个以内（窗口满时等一个完成，再继续遍历）。
+    final window = ParallelWindow(fileConcurrency);
+    // 目录列举同样要并行：子目录一发现就投递，谁先列完谁先产出文件。
+    // 这里必须用「投递不阻塞」的 TaskPool —— 目录任务会继续投递子目录，
+    // 用滑动窗口会等待「包括自己在内」的窗口腾位（死锁）。
+    final dirs = TaskPool(dirConcurrency);
+
+    bool cancelled() => stopped || (isCancelled?.call() ?? false);
 
     void report(ScanItem item) {
       results.add(item);
       onFile?.call(item);
     }
 
-    while (stack.isNotEmpty) {
-      if (isCancelled?.call() ?? false) return results;
-      final current = stack.removeLast();
-      final dirUrl = current.url;
-      final relPath = current.relPath;
-      if (!visited.add(dirUrl)) continue;
-      if (visited.length > maxDirs) return results;
+    Future<void> inspectLater(DavEntry entry, String relPath) {
+      return window.submit(() async {
+        if (cancelled()) return;
+        final item = await _inspectFile(entry, relPath, tempDir, isCancelled);
+        // 取消 / 撞上限之后才完成的检测：不再往界面塞条目（否则列表里会
+        // 多出一堆「已取消」的错误行）
+        if (cancelled()) return;
+        report(item);
+      });
+    }
+
+    Future<void> walk(String dirUrl, String relPath) async {
+      if (cancelled()) return;
+      if (!visited.add(dirUrl)) return;
+      if (visited.length > maxDirs) return;
 
       final List<DavEntry> entries;
       try {
         entries = await client.list(dirUrl);
       } catch (e) {
-        if (isCancelled?.call() ?? false) return results;
+        if (cancelled()) return;
         final name = relPath.isNotEmpty ? relPath.split('/').last : '';
         report(ScanItem(
           url: dirUrl,
@@ -112,12 +150,12 @@ class WebDavScanner {
           size: -1,
           error: '读取目录失败：${errorMessage(e)}',
         ));
-        continue;
+        return;
       }
 
       var filesHere = 0;
       for (final entry in entries) {
-        if (isCancelled?.call() ?? false) return results;
+        if (cancelled()) return;
         if (entry.isDirectory) {
           if (entry.url.replaceAll(RegExp(r'/+$'), '') ==
               dirUrl.replaceAll(RegExp(r'/+$'), '')) {
@@ -126,19 +164,36 @@ class WebDavScanner {
           if (_skipDirs.contains(entry.name.toLowerCase())) continue;
           final childRel =
               relPath.isEmpty ? entry.name : '$relPath/${entry.name}';
-          stack.add((url: entry.url, relPath: childRel));
+          // 子目录一发现就投递（TaskPool 只入队，不阻塞当前遍历）
+          dirs.add(() => walk(entry.url, childRel));
           continue;
         }
         final dot = entry.name.lastIndexOf('.');
         final ext = dot >= 0 ? entry.name.substring(dot + 1).toLowerCase() : '';
         if (!videoExtensions.contains(ext)) continue;
         fileCount++;
-        if (fileCount > maxFiles) return results;
+        if (fileCount > maxFiles) {
+          stopped = true;
+          return;
+        }
         filesHere++;
         final childRel = relPath.isEmpty ? entry.name : '$relPath/${entry.name}';
-        report(await _inspectFile(entry, childRel, tempDir, isCancelled));
+        // 文件窗口满时这里会等一个检测完成，再继续遍历下一个目录
+        await inspectLater(entry, childRel);
       }
-      onDirectory?.call(relPath.isEmpty ? '/' : relPath, filesHere);
+      if (!cancelled()) {
+        onDirectory?.call(relPath.isEmpty ? '/' : relPath, filesHere);
+      }
+    }
+
+    dirs.add(() => walk(client.ensureTrailingSlash(rootUrl), ''));
+    // 先等目录遍历收尾（它会不断投递文件检测），再等所有在跑的检测 ——
+    // 不能让它们在本方法返回之后才回调 onFile。
+    // finally：目录遍历即使因意外报错，也要把已投递的文件检测收干净。
+    try {
+      await dirs.idle();
+    } finally {
+      await window.drain();
     }
     return results;
   }
@@ -181,7 +236,11 @@ class WebDavScanner {
           path: relPath,
           name: entry.name,
           size: entry.size,
-          report: await _inspectViaDownload(entry, tempDir),
+          report: await _inspectViaDownload(
+            entry,
+            tempDir,
+            isCancelled: isCancelled,
+          ),
         );
       } catch (e2) {
         return ScanItem(
@@ -215,11 +274,11 @@ class WebDavScanner {
       size = st?.size ?? -1;
     }
     if (!await _rangeOk(entry)) {
-      return _inspectViaDownload(entry, tempDir);
+      return _inspectViaDownload(entry, tempDir, isCancelled: isCancelled);
     }
     if (size < 0) {
       // 仍未知大小：Range 预取无法进行，回退整档下载
-      return _inspectViaDownload(entry, tempDir);
+      return _inspectViaDownload(entry, tempDir, isCancelled: isCancelled);
     }
     final input = await prefetchForInspect(
       client,
@@ -249,18 +308,20 @@ class WebDavScanner {
 
   Future<InspectReport> _inspectViaDownload(
     DavEntry entry,
-    Directory tempDir,
-  ) async {
+    Directory tempDir, {
+    bool Function()? isCancelled,
+  }) async {
     if (entry.size > fallbackDownloadLimit) {
       throw WebDavException(
         '服务器不支持分段读取，且文件过大（${formatBytes(entry.size)}），已跳过',
       );
     }
     final tmp = File(
-      '${tempDir.path}/probe-${DateTime.now().microsecondsSinceEpoch}.mp4',
+      '${tempDir.path}/probe-${DateTime.now().microsecondsSinceEpoch}'
+      '-${_probeSeq++}.mp4',
     );
     try {
-      await client.download(entry.url, tmp);
+      await client.download(entry.url, tmp, isCancelled: isCancelled);
       final input = FileSeekableInput(tmp);
       try {
         return Mp4Inspect.inspect(

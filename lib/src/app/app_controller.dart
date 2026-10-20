@@ -15,6 +15,7 @@ import '../webdav/webdav.dart';
 import 'engine_tasks.dart';
 import 'models.dart';
 import 'output_target.dart';
+import '../common/parallel.dart';
 import 'repair_ledger.dart';
 import 'settings_store.dart';
 
@@ -50,6 +51,9 @@ class AppController extends ChangeNotifier {
 
   /// 当前正在处理的文件名（底部状态条用它，用户能看出"卡在哪一个文件"）。
   String? currentJobName;
+
+  /// 当前**同时**在处理的文件数（并行度 > 1 时底部状态条显示「N 个并行」）。
+  int activeJobCount = 0;
 
   /// 清掉提示条（用户点「×」）。
   void clearNotice() {
@@ -109,8 +113,46 @@ class AppController extends ChangeNotifier {
 
   JobSource? get runningSource => _runningSource;
 
-  /// 正在后台跑的那次修复（取消时立即中断）。
-  RepairTask? _activeRepair;
+  /// 扫描 / 检测阶段的并行数。
+  ///
+  /// 这一阶段以「读」为主（本地随机读、SAF 预取、WebDAV Range），并行几乎
+  /// 没有副作用；Android 的 SAF provider 保守一些（云端网盘并发太高反而慢）。
+  int get scanParallelism => settings.parallelism > 0
+      ? settings.parallelism
+      : _autoParallelism(scan: true);
+
+  /// 修复阶段的并行数。
+  ///
+  /// 修复是「读 + 写 + 占缓存」：每个文件都要先生成一份完整产物，
+  /// 并行度直接乘以峰值缓存占用。默认值比扫描保守；超大盘建议手动设 1。
+  int get repairParallelism => settings.parallelism > 0
+      ? settings.parallelism
+      : _autoParallelism(scan: false);
+
+  int _autoParallelism({required bool scan}) {
+    // Android 16+ 的入门机仍有不少 3~4GB 内存型号：同时开 3 个修复 Isolate
+    // 再各占一份完整缓存，很容易被系统直接杀掉。低内存设备收敛到「扫描 2 /
+    // 修复 1」，宁可慢一点也要跑完。
+    final cores = _deviceCores > 0 ? _deviceCores : Platform.numberOfProcessors;
+    final lowRam = AndroidPlatform.isSupported && _lowRamDevice;
+    final cap = scan
+        ? (AndroidPlatform.isSupported ? (lowRam ? 2 : 3) : 4)
+        : (AndroidPlatform.isSupported ? (lowRam ? 1 : 2) : 3);
+    final picked = switch (cores) {
+      <= 1 => 1,
+      2 => 2,
+      <= 4 => scan ? (lowRam ? 2 : 3) : (lowRam ? 1 : 2),
+      _ => cap,
+    };
+    return picked < 1 ? 1 : (picked > cap ? cap : picked);
+  }
+
+  /// 设备能力（Android 由平台通道读取；其余平台按 CPU 核数）。
+  bool _lowRamDevice = false;
+  int _deviceCores = 0;
+
+  /// 正在后台跑的那批修复（并行时可能同时有好几个；取消要全部中断）。
+  final Set<RepairTask> _activeRepairs = {};
 
   int _lastNotifyAt = 0;
 
@@ -170,6 +212,10 @@ class AppController extends ChangeNotifier {
     // 上次运行若有未捕获异常（系统级崩溃没法从 Dart 侧看到），提示一下：
     // 详情在「设置 → 复制诊断信息」里（24 小时内的才算"最近"）。
     if (AndroidPlatform.isSupported) {
+      final profile = await AndroidPlatform.deviceProfile();
+      _lowRamDevice = profile.lowRam ||
+          (profile.memoryClassMb > 0 && profile.memoryClassMb < 192);
+      _deviceCores = profile.cores;
       final crash = await AndroidPlatform.readLastCrash();
       if (crash != null &&
           DateTime.now().millisecondsSinceEpoch - crash.time <
@@ -432,9 +478,11 @@ class AppController extends ChangeNotifier {
   void requestCancel() {
     if (!running) return;
     _cancelRequested = true;
-    // 正在跑引擎的 Isolate：立即杀掉，不必等这个文件修完
-    _activeRepair?.cancel();
-    _activeRepair = null;
+    // 正在跑引擎的 Isolate：立即全部杀掉，不必等当前文件修完
+    for (final task in _activeRepairs.toList(growable: false)) {
+      task.cancel();
+    }
+    _activeRepairs.clear();
     // 正在落位 / 复制到缓存的平台侧 IO：同样要中断（大文件复制动辄几分钟）
     unawaited(AndroidPlatform.cancelPlatformWrite());
     notifyListeners();
@@ -561,14 +609,18 @@ class AppController extends ChangeNotifier {
       outputPath: output.path,
       onProgress: onProgress,
     );
-    _activeRepair = task;
+    _activeRepairs.add(task);
+    // 取消可能刚好发生在「检查 _cancelRequested 通过」和「Isolate 起来」之间：
+    // 此时 requestCancel 已经清空集合、走完了，这个任务会漏网。
+    // 登记后再补一次检查，保证「停止」之后不会再有几个文件偷偷修完。
+    if (_cancelRequested) task.cancel();
     try {
       await task.done;
     } catch (_) {
       _quietDeleteFile(output);
       rethrow;
     } finally {
-      if (identical(_activeRepair, task)) _activeRepair = null;
+      _activeRepairs.remove(task);
     }
     return task;
   }
@@ -1082,18 +1134,33 @@ class AppController extends ChangeNotifier {
     if (targets.isEmpty) return;
     _setRunning(targets.first.source);
     _setBatch(targets.length);
-    for (var li = 0; li < targets.length; li++) {
-      final job = targets[li];
-      if (_cancelRequested) break;
-      currentJobName = job.name;
-      await _inspectLocalJob(job);
-      _tickBatch(li + 1);
+    var completed = 0;
+    try {
+      // 检测一个文件 99% 的时间在等 IO（打开文件 / 读 moov / SAF 预取），
+      // 串行做等于让磁盘和 CPU 互相等；这里最多同时检测 scanParallelism 个。
+      await forEachBounded(
+        targets,
+        scanParallelism,
+        (job, _) async {
+          currentJobName = job.name;
+          activeJobCount++;
+          try {
+            await _inspectLocalJob(job);
+          } finally {
+            activeJobCount--;
+            _tickBatch(++completed);
+          }
+        },
+        isCancelled: () => _cancelRequested,
+      );
+    } finally {
+      _setRunning(null);
+      batchDone = 0;
+      batchTotal = 0;
+      currentJobName = null;
+      activeJobCount = 0;
+      notifyListeners();
     }
-    _setRunning(null);
-    batchDone = 0;
-    batchTotal = 0;
-    currentJobName = null;
-    notifyListeners();
   }
 
   /// 检测单个本地任务（含「已修复」复用判定）。
@@ -1369,38 +1436,46 @@ class AppController extends ChangeNotifier {
             '（上限 $_maxScanFiles 个视频 / $_maxScanDirs 个目录）。'
             '剩下的请分几个子文件夹再扫一次。';
       }
-      for (var i = 0; i < entries.length; i++) {
-        if (_cancelRequested) break;
-        final e = entries[i];
-        final job = _newJob(
-          source: JobSource.folder,
-          name: e.name,
-          displayPath: e.path,
-          size: e.size,
-          sourceUri: e.uri,
-          modifiedMs: e.modifiedMs,
-          relDir: relativeDirOf(e.path),
-        );
-        targets.add(job);
-        // 已修复过（产物还在）→ 跳过检测 + 复制
-        if (await _tryReuse(job)) {
-          _tickBatch(i + 1);
-          continue;
-        }
-        job.status = JobStatus.inspecting;
-        job.message = '读取文件头与 moov…';
-        currentJobName = e.name;
-        _notifyThrottled();
-        try {
-          // 只读预取（不整份复制）；不可用时 _inspectSafJob 内部退回复制
-          await _inspectSafJob(job);
-        } catch (err) {
-          job.status = JobStatus.error;
-          job.message = _message(err);
-        }
-        _notifyThrottled();
-        _tickBatch(i + 1);
-      }
+      var completed = 0;
+      // 每个文件的检测都要经过平台通道（开 FD + 跳读盒头/moov）+ 后台 Isolate 解析，
+      // 串行时这两段互相等；并行后实际耗时通常能压到 1/2~1/3。
+      await forEachBounded(
+        entries,
+        scanParallelism,
+        (e, _) async {
+          final job = _newJob(
+            source: JobSource.folder,
+            name: e.name,
+            displayPath: e.path,
+            size: e.size,
+            sourceUri: e.uri,
+            modifiedMs: e.modifiedMs,
+            relDir: relativeDirOf(e.path),
+          );
+          targets.add(job);
+          currentJobName = e.name;
+          activeJobCount++;
+          try {
+            // 已修复过（产物还在）→ 跳过检测 + 复制
+            if (await _tryReuse(job)) return;
+            job.status = JobStatus.inspecting;
+            job.message = '读取文件头与 moov…';
+            _notifyThrottled();
+            try {
+              // 只读预取（不整份复制）；不可用时 _inspectSafJob 内部退回复制
+              await _inspectSafJob(job);
+            } catch (err) {
+              job.status = JobStatus.error;
+              job.message = _message(err);
+            }
+            _notifyThrottled();
+          } finally {
+            activeJobCount--;
+            _tickBatch(++completed);
+          }
+        },
+        isCancelled: () => _cancelRequested,
+      );
     } else {
       final dirPath = settings.scanInputDirPath;
       if (dirPath == null || dirPath.isEmpty) {
@@ -1415,43 +1490,49 @@ class AppController extends ChangeNotifier {
         lastNotice = '已跳过 ${listing.skipped} 个无法读取的文件夹（权限 / 系统目录）';
         notifyListeners();
       }
-      for (var li = 0; li < listing.files.length; li++) {
-        final f = listing.files[li];
-        if (_cancelRequested) break;
-        final job = _newJob(
-          source: JobSource.folder,
-          name: f.path.split(Platform.pathSeparator).last,
-          displayPath: f.rel,
-          size: f.size,
-          localPath: f.path,
-          modifiedMs: f.modifiedMs,
-          relDir: relativeDirOf(f.rel),
-        );
-        targets.add(job);
-        // ★ 先查修复记录：命中且产物还在 → 直接标「已修复」，**跳过检测**。
-        //   之前这段放在检测之后，等于「复用」只省了修复、没省检测 ——
-        //   已修复过的大目录重新扫描，仍然要把每个文件的 moov 全部解析一遍。
-        //   桌面目录可以用 existsSync 同步确认，所以能在检测前判定。
-        if (await _tryReuse(job)) {
-          _tickBatch(li + 1);
-          continue;
-        }
-        job.status = JobStatus.inspecting;
-        currentJobName = f.path.split(Platform.pathSeparator).last;
-        _notifyThrottled();
-        try {
-          final report = await inspectFileInIsolate(
-            f.path,
-            thresholdBytes: settings.thresholdBytes,
-            thresholdSeconds: settings.thresholdSeconds,
+      var completed = 0;
+      await forEachBounded(
+        listing.files,
+        scanParallelism,
+        (f, _) async {
+          final job = _newJob(
+            source: JobSource.folder,
+            name: f.path.split(Platform.pathSeparator).last,
+            displayPath: f.rel,
+            size: f.size,
+            localPath: f.path,
+            modifiedMs: f.modifiedMs,
+            relDir: relativeDirOf(f.rel),
           );
-          _applyReport(job, report);
-        } catch (err) {
-          job.status = JobStatus.error;
-          job.message = _message(err);
-        }
-        _tickBatch(li + 1);
-      }
+          targets.add(job);
+          currentJobName = f.path.split(Platform.pathSeparator).last;
+          activeJobCount++;
+          try {
+            // ★ 先查修复记录：命中且产物还在 → 直接标「已修复」，**跳过检测**。
+            //   之前这段放在检测之后，等于「复用」只省了修复、没省检测 ——
+            //   已修复过的大目录重新扫描，仍然要把每个文件的 moov 全部解析一遍。
+            //   桌面目录可以用 existsSync 同步确认，所以能在检测前判定。
+            if (await _tryReuse(job)) return;
+            job.status = JobStatus.inspecting;
+            _notifyThrottled();
+            try {
+              final report = await inspectFileInIsolate(
+                f.path,
+                thresholdBytes: settings.thresholdBytes,
+                thresholdSeconds: settings.thresholdSeconds,
+              );
+              _applyReport(job, report);
+            } catch (err) {
+              job.status = JobStatus.error;
+              job.message = _message(err);
+            }
+          } finally {
+            activeJobCount--;
+            _tickBatch(++completed);
+          }
+        },
+        isCancelled: () => _cancelRequested,
+      );
     }
   }
 
@@ -1608,6 +1689,9 @@ class AppController extends ChangeNotifier {
         client,
         threshold: settings.thresholdBytes,
         thresholdSeconds: settings.thresholdSeconds,
+        fileConcurrency: scanParallelism,
+        // 目录列举比文件检测更轻：上限 3 路（低内存设备跟着降到 2）
+        dirConcurrency: scanParallelism < 3 ? scanParallelism : 3,
       );
       await scanner.scan(
         client.root,
@@ -1629,7 +1713,9 @@ class AppController extends ChangeNotifier {
             job.message = item.error ?? '检测失败';
           }
           _webDavItems[job.id] = item;
-          notifyListeners();
+          currentJobName = item.name;
+          // 扫描时文件是一个一个回报的：并行后完成顺序不定，重建节流到 10 次/秒
+          _notifyThrottled();
         },
         isCancelled: () => _cancelRequested,
       );
@@ -1679,110 +1765,144 @@ class AppController extends ChangeNotifier {
               .toList();
       _setBatch(targets.length);
       final output = uploadCopies ? null : await outputTarget();
-      for (var wi = 0; wi < targets.length; wi++) {
-        final job = targets[wi];
-        if (_cancelRequested) break;
-        final item = _webDavItems[job.id];
-        if (item == null) {
-          job.status = JobStatus.failed;
-          job.message = '扫描信息已清空，请重新扫描';
-          _tickBatch(wi + 1);
-          notifyListeners();
-          continue;
-        }
-        job.status = JobStatus.fixing;
-        job.progress = 0;
-        job.message = uploadCopies ? '准备上传副本…' : '准备保存到本地…';
-        currentJobName = job.name;
-        notifyListeners();
-
-        if (uploadCopies) {
-          final copyName = _webDavCopyName(job);
-          final result = await fixer.fix(
-            item,
-            copyName: copyName,
-            onPhase: (phase, progress) {
-              job.message = '$phase ${(progress * 100).round()}%';
-              job.progress = progress;
-              _notifyThrottled();
-            },
-            isCancelled: () => _cancelRequested,
-          );
-          _applyFixResult(job, result, uploaded: true);
-          if (result.ok && result.remoteName != null) {
-            _recordRepair(
-              job: job,
-              outName: result.remoteName!,
-              kind: 'remote',
-              ref: '',
-              mode: 'WebDAV 上传副本',
-            );
-          }
-        } else {
-          final tmp = File('${cache.path}/${job.id}-fixed.mp4');
+      var completed = 0;
+      // 一个文件分「下载 → 修复 → 上传」三段，每段都在等网络 / 磁盘。
+      // 同时跑几个文件，天然形成流水线：A 在上传时，B 已经在下一条下载。
+      await forEachBounded(
+        targets,
+        repairParallelism,
+        (job, _) async {
+          if (_cancelRequested) return;
+          currentJobName = job.name;
+          activeJobCount++;
           try {
-            final result = await fixer.fixToFile(
-              item,
-              tmp,
-              onPhase: (phase, progress) {
-                job.message = '$phase ${(progress * 100).round()}%';
-                job.progress = progress;
-                _notifyThrottled();
-              },
-              isCancelled: () => _cancelRequested,
+            await _fixWebDavJob(
+              job,
+              uploadCopies: uploadCopies!,
+              fixer: fixer,
+              cache: cache,
+              output: output,
             );
-            if (result.cancelled) {
-              job.status = JobStatus.cancelled;
-              job.message = '已取消';
-            } else if (!result.ok) {
-              job.status = JobStatus.failed;
-              job.message = '失败：${result.message}';
-            } else {
-              final outName = settings.applyOutputName(job.name);
-              try {
-                final saved = await output!.save(
-                  tmp,
-                  outName,
-                  subDir: job.relDir,
-                );
-                job.outputPath = saved;
-                job.status = JobStatus.saved;
-                job.message = '已保存：$saved';
-                if (output.ledgerKind == 'dir') lastSavedPath = saved;
-                _recordRepair(
-                  job: job,
-                  outName: _relativeOut(job.relDir, outName),
-                  kind: output.ledgerKind,
-                  ref: output.ledgerRef,
-                  mode: 'WebDAV 保存到本地',
-                );
-              } catch (e) {
-                final cancelled = e is SafWriteCancelledException;
-                job.status =
-                    cancelled ? JobStatus.cancelled : JobStatus.failed;
-                job.message = cancelled
-                    ? '已取消（原文件未改动）'
-                    : '保存失败：${_message(e)}';
-              }
-            }
+          } catch (e) {
+            job.status = JobStatus.failed;
+            job.message = _message(e);
           } finally {
-            if (tmp.existsSync()) _quietDeleteFile(tmp);
+            activeJobCount--;
+            _tickBatch(++completed);
           }
-        }
-        job.progress = 0;
-        _tickBatch(wi + 1);
-      }
+        },
+        isCancelled: () => _cancelRequested,
+      );
     } finally {
       client.close();
       _setRunning(null);
       batchDone = 0;
       batchTotal = 0;
       currentJobName = null;
+      activeJobCount = 0;
       final summary = _summaryLine(targets);
       if (summary.isNotEmpty) lastNotice = summary;
       notifyListeners();
       await flushLedger();
     }
+  }
+
+  /// 修复单个 WebDAV 任务（上传副本 / 保存到本地）。
+  Future<void> _fixWebDavJob(
+    FixJob job, {
+    required bool uploadCopies,
+    required WebDavFixer fixer,
+    required Directory cache,
+    required OutputTarget? output,
+  }) async {
+    final item = _webDavItems[job.id];
+    if (item == null) {
+      job.status = JobStatus.failed;
+      job.message = '扫描信息已清空，请重新扫描';
+      notifyListeners();
+      return;
+    }
+    job.status = JobStatus.fixing;
+    job.progress = 0;
+    job.message = uploadCopies ? '准备上传副本…' : '准备保存到本地…';
+    notifyListeners();
+
+    if (uploadCopies) {
+      final copyName = _webDavCopyName(job);
+      final result = await fixer.fix(
+        item,
+        copyName: copyName,
+        onPhase: (phase, progress) {
+          job.message = '$phase ${(progress * 100).round()}%';
+          job.progress = progress;
+          _notifyThrottled();
+        },
+        isCancelled: () => _cancelRequested,
+      );
+      _applyFixResult(job, result, uploaded: true);
+      if (result.ok && result.remoteName != null) {
+        _recordRepair(
+          job: job,
+          outName: result.remoteName!,
+          kind: 'remote',
+          ref: '',
+          mode: 'WebDAV 上传副本',
+        );
+      }
+    } else {
+      final tmp = File('${cache.path}/${job.id}-fixed.mp4');
+      try {
+        final result = await fixer.fixToFile(
+          item,
+          tmp,
+          onPhase: (phase, progress) {
+            job.message = '$phase ${(progress * 100).round()}%';
+            job.progress = progress;
+            _notifyThrottled();
+          },
+          isCancelled: () => _cancelRequested,
+        );
+        if (result.cancelled) {
+          job.status = JobStatus.cancelled;
+          job.message = '已取消';
+        } else if (!result.ok) {
+          job.status = JobStatus.failed;
+          job.message = '失败：${result.message}';
+        } else if (output == null) {
+          job.status = JobStatus.failed;
+          job.message = '保存失败：没有可用的输出位置';
+        } else {
+          final outName = settings.applyOutputName(job.name);
+          try {
+            final saved = await output.save(
+              tmp,
+              outName,
+              subDir: job.relDir,
+            );
+            job.outputPath = saved;
+            job.status = JobStatus.saved;
+            job.message = '已保存：$saved';
+            if (output.ledgerKind == 'dir') lastSavedPath = saved;
+            _recordRepair(
+              job: job,
+              outName: _relativeOut(job.relDir, outName),
+              kind: output.ledgerKind,
+              ref: output.ledgerRef,
+              mode: 'WebDAV 保存到本地',
+            );
+          } catch (e) {
+            final cancelled = e is SafWriteCancelledException;
+            job.status = cancelled ? JobStatus.cancelled : JobStatus.failed;
+            job.message = cancelled
+                ? '已取消（原文件未改动）'
+                : '保存失败：${_message(e)}';
+          }
+        }
+      } finally {
+        if (tmp.existsSync()) _quietDeleteFile(tmp);
+      }
+    }
+    job.progress = 0;
   }
 
   void _applyFixResult(FixJob job, FixResult result, {required bool uploaded}) {
@@ -1841,118 +1961,41 @@ class AppController extends ChangeNotifier {
           ? await folderOutputTarget()
           : await outputTarget();
       final cache = await _cache();
-      for (var index = 0; index < targets.length; index++) {
-        final job = targets[index];
-        if (_cancelRequested) break;
-        var inputPath = job.localPath;
-        // 检测阶段做过"只读预取"（跳过了整份复制）→ 真正要修复了才复制到缓存
-        if (inputPath == null &&
-            job.sourceUri != null &&
-            AndroidPlatform.isSupported) {
-          job.status = JobStatus.fixing;
-          job.progress = 0;
-          job.message = '复制到缓存…';
-          notifyListeners();
+      var completed = 0;
+      // 修复是「读原片 + 写产物 + 落位」的长任务，串行时磁盘几乎一直半空转。
+      // 并行度默认比扫描保守（见 repairParallelism）：每个文件都占一份缓存。
+      await forEachBounded(
+        targets,
+        repairParallelism,
+        (job, _) async {
+          if (_cancelRequested) return;
+          currentJobName = job.name;
+          activeJobCount++;
           try {
-            inputPath = await AndroidPlatform.copyToCache(
-              uri: job.sourceUri!,
-              name: job.name,
+            await _fixLocalJob(
+              job,
+              source: source,
+              output: output,
+              cache: cache,
             );
-            job.localPath = inputPath;
           } catch (e) {
+            // _fixLocalJob 内部已兜底；这里再拦一层，避免未知异常把任务
+            // 永久留在「修复中」状态（列表看着像卡住）。
             job.status = JobStatus.failed;
-            job.message = '复制失败：${_message(e)}';
-            _tickBatch(index + 1);
-            notifyListeners();
-            continue;
+            job.message = _message(e);
+          } finally {
+            activeJobCount--;
+            _tickBatch(++completed);
           }
-        }
-        if (inputPath == null) {
-          job.status = JobStatus.failed;
-          job.message = '缺少本地文件';
-          _tickBatch(index + 1);
-          notifyListeners();
-          continue;
-        }
-        job.status = JobStatus.fixing;
-        job.progress = 0;
-        job.message = '修复中…';
-        currentJobName = job.name;
-        notifyListeners();
-
-        final outName = _outputName(job);
-        // 注意：**一律**先修复到缓存里的独立临时文件，再交给 OutputTarget 落位。
-        // 不能直接写输出目录：若用户把"输出=输入"（就地覆盖，或同名文件），
-        // 直写会一边读原文件一边截断它 —— 直接毁掉源文件。
-        final tmp = File('${cache.path}/${job.id}-$outName');
-        // 递归扫描时产物落回原文件所在子目录 —— 否则子目录里的同名文件
-        // 会在输出根目录上互相覆盖（就地覆盖模式下还会在根目录多出一份）
-        final subDir = job.relDir;
-
-        RepairTask? task;
-        try {
-          // 走统一执行器：登记到 _activeRepair，「停止」才能真正中断它。
-          task = await _isolateRepair(
-            input: File(inputPath),
-            output: tmp,
-            onProgress: (done, total) {
-              if (total > 0) {
-                job.progress = done / total;
-                job.message = '修复中 ${(job.progress * 100).round()}%';
-                _notifyThrottled();
-              }
-            },
-            isCancelled: () => _cancelRequested,
-          );
-          if (_cancelRequested) {
-            job.status = JobStatus.cancelled;
-            job.message = '已取消';
-          } else {
-            // ★ 覆盖前的最后一道闸：产物必须完整可解析，否则绝不落位。
-            //   覆盖是**不可逆**的 —— 就地覆盖模式下写坏了，用户的原片就没了。
-            final invalid = validateRepairOutput(
-              tmp,
-              expectedBytes: task.outputBytes,
-            );
-            if (invalid != null) {
-              job.status = JobStatus.failed;
-              job.message = '已中止覆盖：$invalid（原文件未改动）';
-            } else {
-              final saved = await output.save(tmp, outName, subDir: subDir);
-              job.outputPath = saved;
-              job.status = JobStatus.saved;
-              job.message = '已保存：$saved';
-              if (output.ledgerKind == 'dir') lastSavedPath = saved;
-              _recordRepair(
-                job: job,
-                outName: _relativeOut(subDir, outName),
-                kind: output.ledgerKind,
-                ref: output.ledgerRef,
-                mode: source == JobSource.folder ? '文件夹批量' : '本地文件',
-              );
-            }
-          }
-        } catch (e) {
-          final cancelled = e is RepairCancelledException ||
-              e is SafWriteCancelledException ||
-              task?.cancelled == true;
-          job.status = cancelled ? JobStatus.cancelled : JobStatus.failed;
-          job.message = cancelled
-              ? (e is SafWriteCancelledException
-                  ? '已取消（原文件未改动）'
-                  : '已取消')
-              : _message(e);
-        } finally {
-          if (tmp.existsSync()) _quietDeleteFile(tmp);
-        }
-        job.progress = 0;
-        _tickBatch(index + 1);
-      }
+        },
+        isCancelled: () => _cancelRequested,
+      );
     } finally {
       _setRunning(null);
       batchDone = 0;
       batchTotal = 0;
       currentJobName = null;
+      activeJobCount = 0;
       // 修完的导入副本（整份视频）可以删了（重做会按 sourceUri 重新复制）
       await _cleanupImportedCopies(targets);
       // 结束时给一句汇总（成功 / 跳过 / 失败 + 首个失败原因）
@@ -1961,6 +2004,115 @@ class AppController extends ChangeNotifier {
       notifyListeners();
       await flushLedger();
     }
+  }
+
+  /// 修复单个本地 / 文件夹任务（输出落位、修复记录、取消语义都在这里）。
+  Future<void> _fixLocalJob(
+    FixJob job, {
+    required JobSource source,
+    required OutputTarget output,
+    required Directory cache,
+  }) async {
+    var inputPath = job.localPath;
+    // 检测阶段做过"只读预取"（跳过了整份复制）→ 真正要修复了才复制到缓存
+    if (inputPath == null &&
+        job.sourceUri != null &&
+        AndroidPlatform.isSupported) {
+      job.status = JobStatus.fixing;
+      job.progress = 0;
+      job.message = '复制到缓存…';
+      notifyListeners();
+      try {
+        inputPath = await AndroidPlatform.copyToCache(
+          uri: job.sourceUri!,
+          name: job.name,
+        );
+        job.localPath = inputPath;
+      } catch (e) {
+        final cancelled = _cancelRequested || e is SafWriteCancelledException;
+        job.status = cancelled ? JobStatus.cancelled : JobStatus.failed;
+        job.message = cancelled ? '已取消' : '复制失败：${_message(e)}';
+        notifyListeners();
+        return;
+      }
+    }
+    if (inputPath == null) {
+      job.status = JobStatus.failed;
+      job.message = '缺少本地文件';
+      notifyListeners();
+      return;
+    }
+    job.status = JobStatus.fixing;
+    job.progress = 0;
+    job.message = '修复中…';
+    notifyListeners();
+
+    final outName = _outputName(job);
+    // 注意：**一律**先修复到缓存里的独立临时文件，再交给 OutputTarget 落位。
+    // 不能直接写输出目录：若用户把"输出=输入"（就地覆盖，或同名文件），
+    // 直写会一边读原文件一边截断它 —— 直接毁掉源文件。
+    final tmp = File('${cache.path}/${job.id}-$outName');
+    // 递归扫描时产物落回原文件所在子目录 —— 否则子目录里的同名文件
+    // 会在输出根目录上互相覆盖（就地覆盖模式下还会在根目录多出一份）
+    final subDir = job.relDir;
+
+    RepairTask? task;
+    try {
+      // 走统一执行器：登记到 _activeRepairs，「停止」才能真正中断它。
+      task = await _isolateRepair(
+        input: File(inputPath),
+        output: tmp,
+        onProgress: (done, total) {
+          if (total > 0) {
+            job.progress = done / total;
+            job.message = '修复中 ${(job.progress * 100).round()}%';
+            _notifyThrottled();
+          }
+        },
+        isCancelled: () => _cancelRequested,
+      );
+      if (_cancelRequested) {
+        job.status = JobStatus.cancelled;
+        job.message = '已取消';
+      } else {
+        // ★ 覆盖前的最后一道闸：产物必须完整可解析，否则绝不落位。
+        //   覆盖是**不可逆**的 —— 就地覆盖模式下写坏了，用户的原片就没了。
+        final invalid = validateRepairOutput(
+          tmp,
+          expectedBytes: task.outputBytes,
+        );
+        if (invalid != null) {
+          job.status = JobStatus.failed;
+          job.message = '已中止覆盖：$invalid（原文件未改动）';
+        } else {
+          final saved = await output.save(tmp, outName, subDir: subDir);
+          job.outputPath = saved;
+          job.status = JobStatus.saved;
+          job.message = '已保存：$saved';
+          if (output.ledgerKind == 'dir') lastSavedPath = saved;
+          _recordRepair(
+            job: job,
+            outName: _relativeOut(subDir, outName),
+            kind: output.ledgerKind,
+            ref: output.ledgerRef,
+            mode: source == JobSource.folder ? '文件夹批量' : '本地文件',
+          );
+        }
+      }
+    } catch (e) {
+      final cancelled = e is RepairCancelledException ||
+          e is SafWriteCancelledException ||
+          task?.cancelled == true;
+      job.status = cancelled ? JobStatus.cancelled : JobStatus.failed;
+      job.message = cancelled
+          ? (e is SafWriteCancelledException
+              ? '已取消（原文件未改动）'
+              : '已取消')
+          : _message(e);
+    } finally {
+      if (tmp.existsSync()) _quietDeleteFile(tmp);
+    }
+    job.progress = 0;
   }
 
   /// 清理「上次会话留下的导入副本」。

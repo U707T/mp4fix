@@ -291,6 +291,29 @@ class AndroidPlatform {
     }
   }
 
+  /// 读取设备能力（并行度自适应用）。
+  ///
+  /// Android 16 起入门机型仍然大量是 3~4GB 内存；`isLowRamDevice` 为真时
+  /// 同时跑 3 个修复 Isolate + 3 份完整缓存会把应用顶到 OOM。读取失败时
+  /// 返回「未知」，调用方按 CPU 核数回退。
+  static Future<({bool lowRam, int memoryClassMb, int cores})>
+      deviceProfile() async {
+    try {
+      final raw =
+          await _channel.invokeMethod<Map<Object?, Object?>>('deviceProfile');
+      if (raw == null) {
+        return (lowRam: false, memoryClassMb: 0, cores: 0);
+      }
+      return (
+        lowRam: raw['lowRam'] == true,
+        memoryClassMb: (raw['memoryClassMb'] as num?)?.toInt() ?? 0,
+        cores: (raw['cores'] as num?)?.toInt() ?? 0,
+      );
+    } catch (_) {
+      return (lowRam: false, memoryClassMb: 0, cores: 0);
+    }
+  }
+
   /// 读取上一次未捕获的 Java/Kotlin 异常（时间戳 + 堆栈）；没有则返回 null。
   ///
   /// "点一下扫描就闪退"这类系统级崩溃完全发生在 Dart 之外 —— 靠这张底牌远程排查。

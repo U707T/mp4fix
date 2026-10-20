@@ -101,6 +101,7 @@ class WebDavFixer {
       await client.download(
         item.url,
         downloadFile,
+        isCancelled: isCancelled,
         onProgress: (done, total) {
           if (total > 0) onPhase?.call('下载中', done / total * 0.7);
         },
@@ -129,6 +130,7 @@ class WebDavFixer {
     } on RepairCancelledException {
       return _cancelledResult();
     } catch (e) {
+      if (cancelled()) return _cancelledResult();
       return FixResult(
         ok: false,
         cancelled: false,
@@ -154,6 +156,7 @@ class WebDavFixer {
       await client.download(
         item.url,
         downloadFile,
+        isCancelled: isCancelled,
         onProgress: (done, total) {
           if (total > 0) onPhase?.call('下载中', done / total * 0.7);
         },
@@ -187,6 +190,7 @@ class WebDavFixer {
     } on RepairCancelledException {
       return _cancelledResult();
     } catch (e) {
+      if (cancelled()) return _cancelledResult();
       return FixResult(
         ok: false,
         cancelled: false,
@@ -218,6 +222,7 @@ class WebDavFixer {
       await client.download(
         item.url,
         downloadFile,
+        isCancelled: isCancelled,
         onProgress: (done, total) {
           if (total > 0) onPhase?.call('下载中', done / total * 0.45);
         },
@@ -291,6 +296,7 @@ class WebDavFixer {
     } on RepairCancelledException {
       return _cancelledResult();
     } catch (e) {
+      if (cancelled()) return _cancelledResult();
       // 上传中途失败时清理服务器上的半成品
       if (uploadingTarget != null && !cancelled()) {
         await _quietDelete(uploadingTarget);

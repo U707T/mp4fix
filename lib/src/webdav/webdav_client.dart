@@ -57,12 +57,16 @@ class WebDavClient {
     this.allowInsecureTls = false,
     this.connectTimeout = const Duration(seconds: 15),
     this.readTimeout = const Duration(seconds: 60),
+    int maxConnectionsPerHost = 8,
   }) {
     final trimmed = baseUrl.trim();
     if (trimmed.isEmpty) throw ArgumentError('服务器地址不能为空');
     final withScheme = trimmed.contains('://') ? trimmed : 'https://$trimmed';
     root = sanitizeUrl(withScheme).replaceAll(RegExp(r'/+$'), '');
     _http = HttpClient()..connectionTimeout = connectTimeout;
+    // 并行扫描 / 修复会同时发多个请求（4 个文件 × 预取分块）。
+    // 连接池给一个明确上限：既能把等待叠起来，又不会把家用 NAS 打出 16+ 连接。
+    _http.maxConnectionsPerHost = maxConnectionsPerHost;
     // 不使用透明解压：Range 读取与字节校验都要求拿到原始字节
     _http.autoUncompress = false;
     if (allowInsecureTls) {
@@ -133,6 +137,7 @@ class WebDavClient {
     String url,
     File dest, {
     void Function(int done, int total)? onProgress,
+    bool Function()? isCancelled,
   }) async {
     final r = await _send('GET', url);
     if (!_isSuccess(r.status)) {
@@ -145,6 +150,11 @@ class WebDavClient {
     var done = 0;
     try {
       await for (final chunk in r.response.timeout(readTimeout)) {
+        // 并行修复时可能同时有好几个下载；「停止」要能立刻断开，
+        // 而不是等几 GB 的文件下完（旧版只能等当前文件）。
+        if (isCancelled?.call() ?? false) {
+          throw WebDavException('已取消');
+        }
         sink.writeFromSync(chunk);
         done += chunk.length;
         onProgress?.call(done, total);

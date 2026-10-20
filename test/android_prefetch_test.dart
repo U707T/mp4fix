@@ -71,6 +71,23 @@ void main() {
     expect(report.audioSamples, 189);
   });
 
+  test('deviceProfile：解析低内存标记 / 核数；异常时安全回退', () async {
+    mock((call) async {
+      expect(call.method, 'deviceProfile');
+      return {'lowRam': true, 'memoryClassMb': 128, 'cores': 8};
+    });
+    final profile = await AndroidPlatform.deviceProfile();
+    expect(profile.lowRam, isTrue);
+    expect(profile.memoryClassMb, 128);
+    expect(profile.cores, 8);
+
+    mock((call) async => throw PlatformException(code: 'boom'));
+    final fallback = await AndroidPlatform.deviceProfile();
+    expect(fallback.lowRam, isFalse);
+    expect(fallback.memoryClassMb, 0);
+    expect(fallback.cores, 0, reason: '读不到就按 CPU 核数回退，不能炸启动流程');
+  });
+
   test('readLastCrash：解析平台返回的崩溃记录', () async {
     mock((call) async {
       expect(call.method, 'readLastCrash');

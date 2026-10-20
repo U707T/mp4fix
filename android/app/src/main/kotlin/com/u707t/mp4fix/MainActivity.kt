@@ -1,5 +1,6 @@
 package com.u707t.mp4fix
 
+import android.app.ActivityManager
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
@@ -72,18 +73,23 @@ class MainActivity : FlutterActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     /**
-     * 落位取消标记（SAF 写入 / 下载目录写入）。
+     * 落位取消标记（SAF 写入 / 下载目录写入 / 复制到缓存）。
      *
      * 这些写入动辄几百 MB 到几 GB，`copyTo` 期间 Dart 侧再怎么置取消标记都没用 ——
      * 用户点了「停止」只能干等到复制结束。写入循环里检查这个标记就能及时中断，
      * 而且中断时原文件没有任何改动（`.part` 会被删掉、`.bak` 会还原）。
+     *
+     * **为什么是「代数」而不是布尔值**：并行修复时同一时刻可能有 2~3 个写入在跑。
+     * 以前每次写调用的开头都 `set(false)`，一个任务开始写就会把别的任务刚收到的
+     * 取消标记擦掉；现在每个写入开始时记下当前代数，取消时把代数 +1 ——
+     * 只有「开始之后发生过取消」的写入才会中断，互不干扰。
      */
-    private val cancelWrite = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val cancelEpoch = java.util.concurrent.atomic.AtomicLong(0)
 
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "cancelPlatformWrite" -> {
-                cancelWrite.set(true)
+                cancelEpoch.incrementAndGet()
                 result.success(null)
             }
             "writeToTree" -> {
@@ -224,6 +230,18 @@ class MainActivity : FlutterActivity() {
             // WebDAV 主机栏的「读取默认网关」按钮：快速取本机所在网段的地址。
             "defaultGateway" -> result.success(defaultGateway())
 
+            // 并行度自适应：入门机（isLowRamDevice）内存吃紧，少开几个 Isolate
+            "deviceProfile" -> {
+                val am = getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
+                result.success(
+                    mapOf(
+                        "lowRam" to (am?.isLowRamDevice ?: false),
+                        "memoryClassMb" to (am?.memoryClass ?: 0),
+                        "cores" to Runtime.getRuntime().availableProcessors(),
+                    )
+                )
+            }
+
             "readLastCrash" -> {
                 val crash = try {
                     val f = File(filesDir, CRASH_FILE)
@@ -300,10 +318,13 @@ class MainActivity : FlutterActivity() {
     private fun copyCancellable(
         input: java.io.InputStream,
         output: java.io.OutputStream,
+        epoch: Long,
     ) {
         val buf = ByteArray(1 shl 20)
         while (true) {
-            if (cancelWrite.get()) throw WriteCancelledException("已取消（原文件未改动）")
+            if (cancelEpoch.get() != epoch) {
+                throw WriteCancelledException("已取消（原文件未改动）")
+            }
             val n = input.read(buf)
             if (n < 0) break
             output.write(buf, 0, n)
@@ -345,14 +366,14 @@ class MainActivity : FlutterActivity() {
         val parent = resolveParent(tree, relativeDir)
         val partName = "$name.mp4fix-part"
         val backupName = "$name.mp4fix-bak"
-        cancelWrite.set(false)
+        val epoch = cancelEpoch.get()
 
         // ---- 1) 写 .part（此时原文件还没被碰过，失败也不影响它）----
         val partUri = findChild(tree, parent, partName)
             ?: createDocument(tree, parent, partName)
         try {
             resolver.openOutputStream(partUri, "wt")?.use { out ->
-                source.inputStream().use { input -> copyCancellable(input, out) }
+                source.inputStream().use { input -> copyCancellable(input, out, epoch) }
             } ?: throw IOException("无法打开输出流（所选文件夹不可写）")
         } catch (e: Exception) {
             runCatching { DocumentsContract.deleteDocument(resolver, partUri) }
@@ -411,7 +432,7 @@ class MainActivity : FlutterActivity() {
             try {
                 val copied = resolver.openInputStream(partUri)?.use { input ->
                     resolver.openOutputStream(target, "wt")?.use { out ->
-                        copyCancellable(input, out)
+                        copyCancellable(input, out, epoch)
                     } ?: throw IOException("无法写入新文件")
                     true
                 } ?: throw IOException("无法读取临时文件")
@@ -676,16 +697,19 @@ class MainActivity : FlutterActivity() {
         relativeDir: String? = null,
     ): String {
         val resolver = contentResolver
-        cancelWrite.set(false)
+        val epoch = cancelEpoch.get()
         val relDir = mediaRelDir(relativeDir)
         if (Build.VERSION.SDK_INT >= 29) {
             val existing = findDownload(name, relativeDir)
             if (existing != null) {
                 try {
                     resolver.openOutputStream(existing, "wt")?.use { out ->
-                        source.inputStream().use { input -> copyCancellable(input, out) }
+                        source.inputStream().use { input -> copyCancellable(input, out, epoch) }
                     } ?: throw IOException("无法写入下载目录")
                     return "$relDir$name"
+                } catch (e: WriteCancelledException) {
+                    // 取消：直接冒泡（不要当成「覆盖失败」删掉旧文件再重试一遍）
+                    throw e
                 } catch (e: Exception) {
                     // 覆盖失败：删掉旧文件后走下面的新建流程
                     runCatching { resolver.delete(existing, null, null) }
@@ -701,7 +725,7 @@ class MainActivity : FlutterActivity() {
                 ?: throw IOException("无法在下载目录创建文件")
             try {
                 resolver.openOutputStream(uri, "w")?.use { out ->
-                    source.inputStream().use { input -> copyCancellable(input, out) }
+                    source.inputStream().use { input -> copyCancellable(input, out, epoch) }
                 } ?: throw IOException("无法写入下载目录")
             } catch (e: Exception) {
                 runCatching { resolver.delete(uri, null, null) }
@@ -721,7 +745,7 @@ class MainActivity : FlutterActivity() {
         val out = File(dir, name)
         try {
             source.inputStream().use { input ->
-                out.outputStream().buffered(1 shl 20).use { o -> copyCancellable(input, o) }
+                out.outputStream().buffered(1 shl 20).use { o -> copyCancellable(input, o, epoch) }
             }
         } catch (e: Exception) {
             runCatching { out.delete() }
@@ -916,10 +940,10 @@ class MainActivity : FlutterActivity() {
         val dir = File(cacheDir, "imports").apply { mkdirs() }
         val safeName = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(120)
         val out = File(dir, "${System.nanoTime()}-$safeName")
-        cancelWrite.set(false)
+        val epoch = cancelEpoch.get()
         try {
             contentResolver.openInputStream(uri)?.use { input ->
-                out.outputStream().buffered(1 shl 20).use { o -> copyCancellable(input, o) }
+                out.outputStream().buffered(1 shl 20).use { o -> copyCancellable(input, o, epoch) }
             } ?: throw IOException("无法读取 $uri")
         } catch (e: Exception) {
             // 取消 / 失败都别把半成品留在缓存里

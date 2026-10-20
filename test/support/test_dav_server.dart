@@ -13,6 +13,7 @@ class TestDavServer {
     this.user,
     this.pass,
     this.rangeEnabled,
+    this.latency,
   );
 
   final Directory root;
@@ -20,6 +21,9 @@ class TestDavServer {
   final String? user;
   final String? pass;
   final bool rangeEnabled;
+
+  /// 每个请求的固定延迟（模拟局域网 / 公网 RTT，用于验证并行确实生效）。
+  final Duration latency;
 
   int requestCount = 0;
 
@@ -30,10 +34,12 @@ class TestDavServer {
     String? user,
     String? pass,
     bool rangeEnabled = true,
+    Duration latency = Duration.zero,
     int port = 0,
   }) async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
-    final dav = TestDavServer._(root, server, user, pass, rangeEnabled);
+    final dav =
+        TestDavServer._(root, server, user, pass, rangeEnabled, latency);
     server.listen(dav._handle);
     return dav;
   }
@@ -44,6 +50,7 @@ class TestDavServer {
 
   Future<void> _handle(HttpRequest req) async {
     try {
+      if (latency > Duration.zero) await Future<void>.delayed(latency);
       requestCount++;
       if (!await _checkAuth(req)) return;
 

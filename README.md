@@ -67,20 +67,26 @@ lib/src/webdav/     WebDAV 扫描 / 修复流水线（纯 Dart：dart:io HttpCli
   webdav_fixer.dart     下载 → 无损重排 → 上传副本 / 保存本地（含唯一命名与大小校验）
 lib/src/app/        Material 3 界面（AppController + InheritedNotifier，无额外状态库）
   repair_ledger.dart    修复记录：文件指纹（名称+大小+修改时间）→ 产物位置，扫描时复用
+lib/src/common/
+  parallel.dart         有界并发：批量任务（本地 / WebDAV）共用的并行底座
 lib/src/platform/   Android 平台通道（SAF 写入 / content:// 复制到缓存 / 产物存在性查询）
 android/            MainActivity 里的 MethodChannel（`mp4fix/platform`）
 bin/mp4fix_cli.dart 桌面命令行（修复 / 检测 / WebDAV 扫描与修复）
 tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 ```
 
-### 两个关键设计
+### 三个关键设计
 
 - **远程检测不整档下载**：引擎是同步随机读，WebDAV 是异步 IO —— 因此先把「顶层盒头 + 整个 moov」
   预取回内存（`prefetch.dart`），再交给同步引擎。几 GB 的远端文件通常只需几百 KB~几十 MB 流量。
+  盒大小已知时按 256KB 分块并发取回，不再用 16KB 窗口一段一段串行等往返。
 - **SAF 写入的数据安全**：`name.mp4fix-part` → 校验大小 → **同名旧文件改名为 `.mp4fix-bak` 让位**
   （而不是先删）→ 改名转正 → 清理备份；任一步失败都会还原旧文件，消除「旧文件已删、新文件没写成」的窗口。
+- **并行只加并发，不改业务语义**：`common/parallel.dart` 只做「最多 N 个同时进行」，
+  状态机 / 进度 / 取消 / 修复记录仍留在原来的调用方。每个文件依然先写独立缓存产物、
+  校验通过才落位；「停止」会杀掉所有在跑的修复 Isolate。
 
-## 测试（178 项，`flutter test`）
+## 测试（192 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -92,8 +98,10 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 | `robustness_fuzz_test.dart` | 模糊测试：普通 + 分片夹具各 210 次随机字节破坏 / 截断 / 随机数据，检测不抛异常、修复只抛可捕获异常 |
 | `engine_edge_test.dart` | moov 后置（可优化 → 修复后 faststart）、co64 64 位偏移表 |
 | `fragmented_test.dart` | **分片 MP4**：检测分类 / 无损扁平化（逐样本比对，含 moov 表 + 分片混合写法）/ 距离改进 / 取消 / 截断 |
-| `android_prefetch_test.dart` | Android 只读预取协议：区间解析后直接检测；`not_seekable` 正确降级 |
+| `android_prefetch_test.dart` | Android 只读预取协议：区间解析后直接检测；`not_seekable` 正确降级；`deviceProfile` 低内存 / 核数解析与失败回退 |
 | `default_gateway_test.dart` | 默认网关：`/proc/net/route` / `ip route` / Windows `route print` / macOS + Android 平台通道降级 |
+| `parallel_test.dart` | 并行底座：并行度上限 / 按序启动 / 取消后不再启动 / 单个失败不拖垮整批 / 滑动窗口 / 任务池动态投递子任务 |
+| `parallel_pipeline_test.dart` | 并行端到端：WebDAV 6 文件扫描与修复 / 本地 5 文件修复 / **客户端侧请求确实同时在途** / 取消不入列表 |
 | `webdav_test.dart` | WebDAV 端到端 13 项（中文/空格路径、Range 降级、认证、取消、分片 MP4 远程检测与修复、产物字节校验…） |
 | `webdav_util_test.dart` | URL 工具 + **服务端提前断开时识别"下载不完整"** |
 | `output_target_test.dart` | 落位安全：同名覆盖 / **失败还原旧文件** / 自动建目录 / 记录用位置信息 |
@@ -113,7 +121,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（178 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
+flutter test                     # 全部测试（192 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -128,8 +136,44 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 178 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 192 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.9.0 · 并行：不再一个文件一个文件地等）
+
+三条流水线（本地检测 / 本地修复 / WebDAV 扫描与修复）原来都是 `for` 循环。
+耗时并不在计算上，而在**等**：等磁盘、等 SAF provider、等 HTTP 往返。
+这一版给每条流水线加了「最多 N 个同时进行」：
+
+- **本地 / 文件夹扫描**：同时检测（桌面 4 / Android 3）。已修复过的文件仍然在
+  检测前就按记录跳过；
+- **本地 / 文件夹修复**：同时修复（桌面 3 / Android 2）。每个文件依然先写独立
+  缓存产物 → 校验大小与结构 → 才允许落位，数据安全不变量不变；
+- **WebDAV 扫描**：文件级并行 + 目录列举并行（3 路）+ **大盒分块并发** ——
+  `moov`/`moof` 的剩余字节按 256KB、最多 4 路取回，5MB 的 moov 从约 320 次
+  串行 Range 请求降到约 20 次；目录遍历与文件检测互相重叠；
+- **WebDAV 修复**：下载 → 修复 → 上传形成流水线，A 在上传时 B 已经在下一条下载；
+- **设置 → 性能**：自动 / 1 / 2 / 3 / 4；选 1 即回到旧的串行行为；
+- **停止**：并行后登记**所有**在跑的修复 Isolate，一次全部杀掉；SAF 写入的取消
+  标记从布尔值改成「代数」，多个写入不会互相擦除取消状态。
+
+### Android 16+（API 36/37）
+
+- 低内存设备（`isLowRamDevice` 或 `memoryClass < 192MB`）自动降为「扫描 2 / 修复 1」，
+  避免多个修复 Isolate + 多份完整缓存被系统 OOM 杀掉；
+- 并行不新增权限、不新增服务：批量任务仍是单个 `dataSync` 前台服务，
+  Android 15/16 的 dataSync 超时逻辑不变；
+- 16KB 页 / 预测性返回 / 边到边沿用 v2.4.2 的适配。
+
+### 实测（8 核沙箱，49MB × 4 个文件，本地 SSD）
+
+- 检测 4 个文件：15ms → 11ms（单文件检测只有 2.5ms，瓶颈是 Isolate 启动）；
+- 修复 4 个文件：324ms → 265ms（约 1.2×；桌面 SSD 上修复是带宽瓶颈，
+  收益有限）；
+- WebDAV 扫描 12 个文件（每个请求人为加 30ms 往返）：909ms → 423ms（约 2.1×）；
+- WebDAV 扫描 12 个目录各 1 个文件（20ms 往返）：649ms → 251ms（约 2.6×）。
+  真正的收益在 **WebDAV（RTT 占大头）与 Android SAF（每次落位都要过平台通道 +
+  provider）**，以及大目录的扫描。
 
 ## 本版要点（v2.8.0 · 「停止」立刻生效 + 每个操作都有结果）
 
@@ -432,6 +476,8 @@ v2.7.1 加了「恢复 .mp4fix-bak 残留」，但 `restoreBackup` **只在 SAF 
 - 输出总大小超过 4 GB 的文件暂不支持；
 - WebDAV 认证仅支持 HTTP Basic；
 - Android 端若输入来源不支持随机读取（少数网盘类 provider），会先复制到应用缓存再处理（需要临时空间）；
+- 并行修复会同时占用多份完整缓存（同时修 N 个文件 ≈ N 份产物大小）；
+  超大文件、机械盘或存储空间紧张时，建议在「设置 → 性能」里把并行数设为 1；
 - 旧版 Kotlin 项目（`/workspace/mp4fix`）保持原样，仅作参考。
 
 ## 许可

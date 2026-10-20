@@ -195,23 +195,74 @@ Future<PrefetchedSeekableInput> prefetchForInspect(
           );
         }
       }
-      // 补齐整盒（窗口可能不够；每段仍按窗口大小取，末段顺路多取一点）
+      // 补齐整盒。盒大小已知、块之间互不依赖 —— 按 256KB 分块**并发**取回，
+      // 而不是继续 16KB 一段地串行等往返：一个 5MB 的 moov 从 320 次请求
+      // 降到 20 次（并发 4），局域网 / 公网都能快一个数量级。
       final boxEnd = pos + size;
-      while (coverEnd < boxEnd) {
-        if (isCancelled?.call() ?? false) throw WebDavException('已取消');
-        final start2 = coverEnd;
-        final endInclusive = start2 + windowBytes - 1 < fileSize - 1
-            ? start2 + windowBytes - 1
-            : fileSize - 1;
-        final bytes = await client.getRange(url, start2, endInclusive);
-        if (bytes.isEmpty) throw WebDavException('预取读取为空（服务器异常？）');
-        cover = bytes;
-        coverStart = start2;
-        coverEnd = start2 + bytes.length;
-        ranges.add(PrefetchRange(start2, bytes));
+      if (coverEnd < boxEnd) {
+        await _fetchBoxTail(
+          client,
+          url,
+          coverEnd,
+          boxEnd,
+          ranges,
+          isCancelled: isCancelled,
+        );
       }
     }
     pos += size;
   }
   return PrefetchedSeekableInput(size: fileSize, ranges: ranges);
+}
+
+/// 并发取回 `[start, endExclusive)` 的字节（用于补齐一个已知大小的大盒）。
+///
+/// 结果先拼成**一整块**再加进 [ranges]：`PrefetchedSeekableInput` 合并相邻
+/// 区间时会反复分配 + 拷贝，几百个 256KB 的小段拼进去会退化成 O(n²)。
+Future<void> _fetchBoxTail(
+  WebDavClient client,
+  String url,
+  int start,
+  int endExclusive,
+  List<PrefetchRange> ranges, {
+  required bool Function()? isCancelled,
+  int chunkBytes = 256 << 10,
+  int concurrency = 4,
+}) async {
+  final total = endExclusive - start;
+  final buffer = Uint8List(total);
+  final active = <Future<void>>[];
+
+  Future<void> fetchChunk(int from, int to) async {
+    final bytes = await client.getRange(url, from, to);
+    if (bytes.length != to - from + 1) {
+      throw WebDavException('预取读取不完整（服务器异常？）');
+    }
+    buffer.setRange(from - start, from - start + bytes.length, bytes);
+  }
+
+  Future<void> drainActive() async {
+    if (active.isEmpty) return;
+    final batch = active.toList(growable: false);
+    active.clear();
+    await Future.wait(batch);
+  }
+
+  for (var pos = start; pos < endExclusive; pos += chunkBytes) {
+    if (isCancelled?.call() ?? false) {
+      // 先等在跑的请求收尾，避免留下未处理的异步错误
+      try {
+        await drainActive();
+      } catch (_) {
+        // 取消优先，具体错误不重要
+      }
+      throw WebDavException('已取消');
+    }
+    final to =
+        (pos + chunkBytes < endExclusive ? pos + chunkBytes : endExclusive) - 1;
+    active.add(fetchChunk(pos, to));
+    if (active.length >= concurrency) await drainActive();
+  }
+  await drainActive();
+  ranges.add(PrefetchRange(start, buffer));
 }

@@ -16,6 +16,7 @@ void main() {
       outputDirPath: r'D:\Videos',
       scanInputTreeUri: 'content://tree/y',
       scanInputDirPath: r'D:\In',
+      parallelism: 3,
       webdav: WebDavConfig(
         host: '10.0.0.9',
         port: '5244',
@@ -36,6 +37,7 @@ void main() {
     expect(back.outputDirPath, r'D:\Videos');
     expect(back.scanInputTreeUri, 'content://tree/y');
     expect(back.scanInputDirPath, r'D:\In');
+    expect(back.parallelism, 3);
     expect(back.webdav.host, '10.0.0.9');
     expect(back.webdav.port, '5244');
     expect(back.webdav.path, '/dav/本地存储/Vedios');
@@ -143,5 +145,6 @@ void main() {
     expect(s.includeOptimizable, isFalse);
     expect(s.themeMode, ThemeMode.system);
     expect(s.webDavPassword, isEmpty);
+    expect(s.parallelism, 0, reason: '0 = 自动（按核数 / 内存决定）');
   });
 }

@@ -447,6 +447,7 @@ class AppSettings {
     this.rememberWebDavPassword = false,
     this.webDavPassword = '',
     this.reuseRepairs = true,
+    this.parallelism = 0,
     this.nameMode = OutputNameMode.original,
     this.namePrefix = '',
     this.nameSuffix = '_fixed',
@@ -478,6 +479,12 @@ class AppSettings {
 
   /// 是否记住修复记录：重新扫描时认出已修复过的文件，跳过（复用上次结果）。
   bool reuseRepairs;
+
+  /// 并行处理的文件数；0 = 自动（按 CPU 核数 / 平台选择，见 AppController）。
+  ///
+  /// 扫描以「读」为主，可以开得高一些；修复同时读 + 写 + 占缓存空间，
+  /// 自动值更保守。手动设为 1 即完全回到旧的串行行为。
+  int parallelism;
 
   /// 输出文件命名规则。
   OutputNameMode nameMode;
@@ -532,6 +539,7 @@ class AppSettings {
     'rememberWebDavPassword': rememberWebDavPassword,
     'webDavPassword': webDavPassword,
     'reuseRepairs': reuseRepairs,
+    'parallelism': parallelism,
     'nameMode': nameMode.name,
     'namePrefix': namePrefix,
     'nameSuffix': nameSuffix,
@@ -554,6 +562,7 @@ class AppSettings {
     rememberWebDavPassword: json['rememberWebDavPassword'] as bool? ?? false,
     webDavPassword: json['webDavPassword'] as String? ?? '',
     reuseRepairs: json['reuseRepairs'] as bool? ?? true,
+    parallelism: (json['parallelism'] as num?)?.toInt() ?? 0,
     nameMode: OutputNameMode.values.firstWhere(
       (m) => m.name == json['nameMode'],
       orElse: () => OutputNameMode.original,

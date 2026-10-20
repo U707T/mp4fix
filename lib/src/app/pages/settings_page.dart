@@ -12,7 +12,7 @@ class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
   /// 与 pubspec.yaml 的 version 保持一致。
-  static const String appVersion = '2.8.0';
+  static const String appVersion = '2.9.0';
 
   @override
   Widget build(BuildContext context) {
@@ -134,6 +134,41 @@ class SettingsPage extends StatelessWidget {
             ],
           ),
           const _NameRuleCard(),
+          SectionCard(
+            title: '性能',
+            icon: Icons.speed_rounded,
+            children: [
+              const Text('并行处理'),
+              const SizedBox(height: 8),
+              SegmentedButton<int>(
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(value: 0, label: Text('自动')),
+                  ButtonSegment(value: 1, label: Text('1')),
+                  ButtonSegment(value: 2, label: Text('2')),
+                  ButtonSegment(value: 3, label: Text('3')),
+                  ButtonSegment(value: 4, label: Text('4')),
+                ],
+                selected: {
+                  settings.parallelism.clamp(0, 4).toInt(),
+                },
+                onSelectionChanged: canEdit
+                    ? (v) => controller.updateSettings(
+                        (s) => s.parallelism = v.first,
+                      )
+                    : null,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '同时处理的文件数。自动：扫描 ${controller.scanParallelism} 个 / '
+                '修复 ${controller.repairParallelism} 个。并行修复会同时占用'
+                '多份临时空间，超大文件建议设为 1。',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
           SectionCard(
             title: '外观',
             icon: Icons.palette_rounded,
