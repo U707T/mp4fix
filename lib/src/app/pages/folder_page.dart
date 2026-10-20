@@ -36,8 +36,9 @@ class _FolderPageState extends State<FolderPage> {
   Widget build(BuildContext context) {
     final controller = AppScope.of(context);
     final all = controller.jobsOf(JobSource.folder);
-    final jobs =
-        all.where((j) => _filter.matches(j.status)).toList(growable: false);
+    final jobs = all
+        .where((j) => _filter.matches(j.status))
+        .toList(growable: false);
     final busy = controller.runningSource == JobSource.folder;
     final canRun = !controller.running;
 
@@ -75,8 +76,9 @@ class _FolderPageState extends State<FolderPage> {
     bool busy,
     bool canRun,
   ) {
-    final jobs =
-        all.where((j) => _filter.matches(j.status)).toList(growable: false);
+    final jobs = all
+        .where((j) => _filter.matches(j.status))
+        .toList(growable: false);
     return Column(
       children: [
         SectionCard(
@@ -122,15 +124,16 @@ class _FolderPageState extends State<FolderPage> {
           icon: Icons.tune_rounded,
           collapsible: true,
           initiallyExpanded: false,
-          summary: '阈值 ${controller.settings.thresholdMb} MB'
+          summary:
+              '阈值 ${controller.settings.thresholdMb} MB'
               ' / ${controller.settings.thresholdSeconds.toStringAsFixed(1)} 秒'
               ' · ${controller.settings.includeOptimizable ? '含可优化' : '不含可优化'}',
           children: [
             Text(
               '最大交错距离超过阈值即视为「需重排」；几十~几百 MB 才是卡顿元凶，几百 KB 的不用管。',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
-                  ),
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
+              ),
             ),
             const SizedBox(height: Insets.gapLarge),
             Row(
@@ -147,8 +150,9 @@ class _FolderPageState extends State<FolderPage> {
                   ],
                   selected: {controller.settings.thresholdMb},
                   onSelectionChanged: canRun
-                      ? (values) => controller
-                          .updateSettings((s) => s.thresholdMb = values.first)
+                      ? (values) => controller.updateSettings(
+                          (s) => s.thresholdMb = values.first,
+                        )
                       : null,
                 ),
               ],
@@ -168,7 +172,8 @@ class _FolderPageState extends State<FolderPage> {
                   selected: {controller.settings.thresholdSeconds},
                   onSelectionChanged: canRun
                       ? (values) => controller.updateSettings(
-                          (s) => s.thresholdSeconds = values.first)
+                          (s) => s.thresholdSeconds = values.first,
+                        )
                       : null,
                 ),
               ],
@@ -179,11 +184,13 @@ class _FolderPageState extends State<FolderPage> {
               contentPadding: EdgeInsets.zero,
               title: const Text('同时处理「可优化」'),
               subtitle: const Text(
-                  '只缺 moov 前置、或分片（fragmented）MP4 也一起处理（转换为标准 MP4，兼容性更好）'),
+                '只缺 moov 前置、或分片（fragmented）MP4 也一起处理（转换为标准 MP4，兼容性更好）',
+              ),
               value: controller.settings.includeOptimizable,
               onChanged: canRun
-                  ? (v) =>
-                      controller.updateSettings((s) => s.includeOptimizable = v)
+                  ? (v) => controller.updateSettings(
+                      (s) => s.includeOptimizable = v,
+                    )
                   : null,
             ),
           ],
@@ -192,16 +199,20 @@ class _FolderPageState extends State<FolderPage> {
           actions: [
             FilledButton.tonalIcon(
               onPressed: canRun
-                  ? () => guardUi(context,
-                      () => controller.scanFolder(fixAfterScan: false))
+                  ? () => guardUi(
+                      context,
+                      () => controller.scanFolder(fixAfterScan: false),
+                    )
                   : null,
               icon: const Icon(Icons.travel_explore_rounded),
               label: const Text('仅扫描'),
             ),
             FilledButton.icon(
               onPressed: canRun
-                  ? () => guardUi(context,
-                      () => controller.scanFolder(fixAfterScan: true))
+                  ? () => guardUi(
+                      context,
+                      () => controller.scanFolder(fixAfterScan: true),
+                    )
                   : null,
               icon: const Icon(Icons.build_rounded),
               label: const Text('扫描并修复'),
@@ -225,21 +236,24 @@ class _FolderPageState extends State<FolderPage> {
           fixableCount: controller.fixableCount(JobSource.folder),
           onFixAll: canRun && controller.hasFixable(JobSource.folder)
               ? () =>
-                  guardUi(context, () => controller.fixJobs(JobSource.folder))
+                    guardUi(context, () => controller.fixJobs(JobSource.folder))
               : null,
           onProcessAll:
               canRun && controller.processAllCount(JobSource.folder) > 0
-                  ? () => runProcessAll(context, controller, JobSource.folder)
-                  : null,
+              ? () => runProcessAll(context, controller, JobSource.folder)
+              : null,
         ),
         if (controller.lastNotice != null)
           Padding(
             padding: const EdgeInsets.fromLTRB(
-                Insets.page, Insets.gap, Insets.page, 0),
-            child: StatusStrip(
-              icon: Icons.info_outline_rounded,
+              Insets.page,
+              Insets.gap,
+              Insets.page,
+              0,
+            ),
+            child: NoticeStrip(
               text: controller.lastNotice!,
-              tone: StatusTone.warn,
+              onClose: controller.clearNotice,
             ),
           ),
         if (all.isEmpty)
@@ -248,7 +262,8 @@ class _FolderPageState extends State<FolderPage> {
             child: EmptyHint(
               icon: Icons.folder_copy_rounded,
               title: '递归检测整个文件夹',
-              subtitle: '「仅扫描」只做体检；\n'
+              subtitle:
+                  '「仅扫描」只做体检；\n'
                   '「扫描并修复」会把需重排的文件无损重排后写入输出位置。',
             ),
           )

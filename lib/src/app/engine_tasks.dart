@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:isolate';
-import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart';
 
 import '../engine/engine.dart';
 import '../webdav/prefetch.dart';
@@ -118,10 +119,18 @@ VideoFolderListing listVideosSync(String rootPath) {
 
 /// 后台修复任务的句柄：可监听进度、等待结果、取消。
 class RepairTask {
-  RepairTask._(this._isolate, this._port, this._completer);
+  RepairTask._(this._isolate, this._port, this._completer, this._exitPort);
 
   final Isolate _isolate;
   final ReceivePort _port;
+
+  /// 监听 Isolate 的**意外退出**（引擎在后台抛错 / OOM 被系统杀掉）。
+  ///
+  /// 没有它的时候，worker 一旦非正常结束就再也不会发消息，而 `done` 是一个
+  /// 永远不完成的 Future —— 界面表现为「修复中 63%」永久卡住，`running`
+  /// 一直是 true，所有按钮（添加 / 扫描 / 修复 / 设置）全部变灰，只能杀进程。
+  final ReceivePort _exitPort;
+
   final Completer<RepairStats> _completer;
   bool _cancelled = false;
   bool get cancelled => _cancelled;
@@ -139,26 +148,50 @@ class RepairTask {
   /// 立即取消（杀死 Isolate；半成品文件由调用方清理）。
   void cancel() {
     _cancelled = true;
-    _isolate.kill(priority: Isolate.immediate);
     if (!_completer.isCompleted) {
       _completer.completeError(RepairCancelledException());
     }
+    try {
+      _isolate.kill(priority: Isolate.immediate);
+    } catch (_) {
+      // 已结束的 Isolate 再 kill 会抛（很少见），忽略即可
+    }
     _port.close();
+    _exitPort.close();
   }
 
   /// 在后台 Isolate 中把 [inputPath] 修复到 [outputPath]。
+  ///
+  /// [crashForTest] 仅供测试：让 worker 不做任何事直接杀掉自己，
+  /// 用来回归「Isolate 意外退出后任务必须失败而不是永远卡住」。
   static Future<RepairTask> start({
     required String inputPath,
     required String outputPath,
     void Function(int done, int total)? onProgress,
+    @visibleForTesting bool crashForTest = false,
   }) async {
     final port = ReceivePort();
-    final isolate = await Isolate.spawn(
-      _repairWorker,
-      _RepairArgs(inputPath, outputPath, port.sendPort),
-    );
+    final exitPort = ReceivePort();
+    final Isolate isolate;
+    try {
+      isolate = await Isolate.spawn(
+        _repairWorker,
+        _RepairArgs(inputPath, outputPath, port.sendPort, crashForTest),
+        onExit: exitPort.sendPort,
+        errorsAreFatal: true,
+      );
+    } catch (_) {
+      port.close();
+      exitPort.close();
+      rethrow;
+    }
     final completer = Completer<RepairStats>();
-    final task = RepairTask._(isolate, port, completer);
+    final task = RepairTask._(isolate, port, completer, exitPort);
+
+    void finish() {
+      port.close();
+      exitPort.close();
+    }
 
     port.listen((message) {
       if (message is! Map) return;
@@ -171,7 +204,7 @@ class RepairTask {
           if (!completer.isCompleted) {
             completer.complete(stats);
           }
-          port.close();
+          finish();
           isolate.kill(priority: Isolate.beforeNextEvent);
         case 'error':
           if (!completer.isCompleted) {
@@ -181,20 +214,40 @@ class RepairTask {
                   : RepairException(message['message'] as String? ?? '修复失败'),
             );
           }
-          port.close();
+          finish();
           isolate.kill(priority: Isolate.beforeNextEvent);
       }
+    });
+
+    // Isolate 非正常退出（worker 内部未捕获错误 / 被系统回收）→ 一定要给调用方
+    // 一个结果，否则任务会永远停在「修复中」，整个界面从此不可用。
+    exitPort.listen((_) {
+      if (completer.isCompleted) return;
+      completer.completeError(
+        task._cancelled
+            ? RepairCancelledException()
+            : RepairException('修复进程意外结束（可能是内存不足或文件被占用），请重试'),
+      );
+      finish();
     });
     return task;
   }
 }
 
 class _RepairArgs {
-  const _RepairArgs(this.inputPath, this.outputPath, this.sendPort);
+  const _RepairArgs(
+    this.inputPath,
+    this.outputPath,
+    this.sendPort, [
+    this.crashForTest = false,
+  ]);
 
   final String inputPath;
   final String outputPath;
   final SendPort sendPort;
+
+  /// 仅测试用：worker 立刻自杀，模拟「Isolate 意外退出」。
+  final bool crashForTest;
 }
 
 /// Isolate 入口：同步执行引擎，进度经 SendPort 回传（约 8 次/秒，避免端口刷屏）。
@@ -203,6 +256,11 @@ void _repairWorker(_RepairArgs args) {
   SeekableInput? input;
   FileSyncSink? sink;
   var lastSentMs = 0;
+  if (args.crashForTest) {
+    // 模拟进程被系统杀掉 / 引擎在 try 之外崩溃：**不发任何消息**。
+    Isolate.current.kill(priority: Isolate.immediate);
+    return;
+  }
   try {
     input = FileSeekableInput(File(args.inputPath));
     final outFile = File(args.outputPath);

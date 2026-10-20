@@ -18,6 +18,7 @@ void main() {
 
   RepairRecord record({
     String key = 'f|a.mp4|100|123',
+    String name = 'a.mp4',
     String out = 'a.mp4',
     String kind = 'dir',
     String ref = '/out',
@@ -25,7 +26,7 @@ void main() {
     String rule = 'original||_fixed',
   }) => RepairRecord(
     key: key,
-    name: 'a.mp4',
+    name: name,
     size: 100,
     modifiedMs: 123,
     out: out,
@@ -36,12 +37,46 @@ void main() {
     at: at,
   );
 
-  test('指纹：本地用 名称+大小+修改时间，远端用 URL+大小', () {
+  test('指纹：本地用 位置+名称+大小+修改时间，远端用 URL+大小', () {
+    // 位置为空时是旧格式（仓库里没有位置信息的老记录也能对上）
     expect(ledgerKeyFile(name: 'a.mp4', size: 7, modifiedMs: 9),
-        'f|a.mp4|7|9');
-    expect(ledgerKeyFile(name: 'a.mp4', size: 7, modifiedMs: 0), 'f|a.mp4|7|0');
+        'f||a.mp4|7|9');
+    expect(ledgerKeyFile(name: 'a.mp4', size: 7, modifiedMs: 0), 'f||a.mp4|7|0');
     expect(ledgerKeyRemote(url: 'http://x/y.mp4', size: 7),
         'r|http://x/y.mp4|7');
+  });
+
+  test('指纹带位置：同一部片复制到别的目录后不会被误判「已修复」', () {
+    final a = ledgerKeyFile(
+      name: 'x.mp4',
+      size: 100,
+      modifiedMs: 5,
+      path: '/media/A/x.mp4',
+    );
+    final b = ledgerKeyFile(
+      name: 'x.mp4',
+      size: 100,
+      modifiedMs: 5,
+      path: '/media/B/x.mp4',
+    );
+    expect(
+      a,
+      isNot(b),
+      reason: '只用 名称+大小+修改时间 时，复制出来的副本会命中原件的记录 → '
+          '显示「已修复」但其实一次都没修',
+    );
+  });
+
+  test('purgeName：按名字清掉记录（恢复 .mp4fix-bak 之后不再算「已修复」）', () {
+    final ledger = RepairLedger.empty()
+      ..put(record(key: 'k1', name: 'a.mp4'))
+      ..put(record(key: 'k2', name: 'a.mp4'))
+      ..put(record(key: 'k3', name: 'b.mp4'));
+    expect(ledger.purgeName('a.mp4'), 2);
+    expect(ledger.lookup('k1'), isNull);
+    expect(ledger.lookup('k2'), isNull);
+    expect(ledger.lookup('k3'), isNotNull);
+    expect(ledger.purgeName('none.mp4'), 0);
   });
 
   test('存盘 → 重新载入：内容一致', () async {

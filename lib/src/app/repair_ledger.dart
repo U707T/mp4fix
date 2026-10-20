@@ -88,12 +88,20 @@ class RepairRecord {
   }
 }
 
-/// 本地 / 文件夹文件的指纹：名称 + 大小 + 修改时间（毫秒；未知为 0）。
+/// 本地 / 文件夹文件的指纹：位置 + 名称 + 大小 + 修改时间（毫秒；未知为 0）。
+///
+/// **位置必须参与指纹**：以前只用「名称 + 大小 + 修改时间」，于是把 `A/x.mp4`
+/// 复制到 `B/`（大小与修改时间都保留）之后，`B/x.mp4` 会命中 `A` 的记录而被
+/// 标成「已修复、跳过」—— 可它其实一次都没修过，用户看到的就是「明明没修却
+/// 说修好了」。同理，不同目录里的同名同大小文件也会互相顶掉记录。
+///
+/// [path] 为空时退化为旧行为（仓库里没有位置信息的老记录 / 测试用）。
 String ledgerKeyFile({
   required String name,
   required int size,
   required int modifiedMs,
-}) => 'f|$name|$size|$modifiedMs';
+  String path = '',
+}) => 'f|$path|$name|$size|$modifiedMs';
 
 /// WebDAV 远端文件的指纹：URL + 大小。
 String ledgerKeyRemote({required String url, required int size}) =>
@@ -145,6 +153,22 @@ class RepairLedger {
   }
 
   bool remove(String key) => _entries.remove(key) != null;
+
+  /// 按文件名删除所有相关记录（不限位置 / 大小 / 修改时间）。
+  ///
+  /// 「恢复 .mp4fix-bak 残留」用得上：残留文件被改回原名之后，它其实还是**没修过
+  /// 的原片**，但仓库里可能留了一条「已修复」的记录（当初落位"成功"时写下的）。
+  /// 不按名字整条清掉，下次扫描就会把它标成「已修复」跳过 —— 用户以为修好了。
+  int purgeName(String name) {
+    final keys = _entries.values
+        .where((r) => r.name == name)
+        .map((r) => r.key)
+        .toList(growable: false);
+    for (final key in keys) {
+      _entries.remove(key);
+    }
+    return keys.length;
+  }
 
   void clear() => _entries.clear();
 

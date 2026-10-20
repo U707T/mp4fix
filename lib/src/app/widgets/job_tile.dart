@@ -67,7 +67,8 @@ class JobTile extends StatelessWidget {
             Text(
               [
                 if (job.displayPath.isNotEmpty) job.displayPath,
-                formatBytes(job.size),
+                // SAF / content:// 来源拿不到大小时是 -1，别显示成「-1 B」
+                job.size > 0 ? formatBytes(job.size) : '大小未知',
               ].join(' · '),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
@@ -77,6 +78,10 @@ class JobTile extends StatelessWidget {
               const SizedBox(height: 6),
               Text(
                 job.message,
+                // 失败原因可能很长（异常原文 / 路径）：限行 + 省略，避免一条任务
+                // 把整屏撑满，把下面的条目全挤到屏幕外
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
                 style: text.bodySmall?.copyWith(
                   color: status.problematic ? scheme.error : null,
                 ),

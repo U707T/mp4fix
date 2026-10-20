@@ -92,7 +92,8 @@ class _HomeShellState extends State<HomeShell> {
                     Expanded(
                       child: Text(
                         '正在处理${_sourceName(runningSource)}'
-                        '${controller.batchTotal > 0 ? '（${controller.batchDone}/${controller.batchTotal}）' : '…'}',
+                        '${controller.batchTotal > 0 ? '（${controller.batchDone}/${controller.batchTotal}）' : '…'}'
+                        '${controller.currentJobName == null ? '' : ' · ${controller.currentJobName}'}',
                         style: text.bodySmall,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,

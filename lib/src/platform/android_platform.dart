@@ -11,6 +11,19 @@ class SafNotSeekableException implements Exception {
   String toString() => '来源不支持随机读取（已退回复制到缓存）';
 }
 
+/// 用户取消了落位（SAF 写入）。
+///
+/// 取消时原文件没有任何改动，界面应显示「已取消」而不是「失败」。
+class SafWriteCancelledException implements Exception {
+  const SafWriteCancelledException();
+
+  /// 与 Kotlin 侧 `result.error("cancelled", …)` 约定的错误码。
+  static const String code = 'cancelled';
+
+  @override
+  String toString() => '已取消（原文件未改动）';
+}
+
 /// 一个「只剩 `.mp4fix-bak`」的残留文件（v2.7.0 及以前 SAF 落位缺陷的现场）。
 ///
 /// [originalName] 是它本该叫的名字；[size] 就是原视频的大小 —— 数据没丢，
@@ -89,16 +102,32 @@ class AndroidPlatform {
 
   /// 把 [sourcePath] 写入 SAF 文件夹 [treeUri]，覆盖同名文件。
   /// 返回写入后的文档 URI。
+  ///
+  /// [relativeDir] 为相对子目录（`sub/dir`，空串 = 根目录）：递归扫描文件夹时
+  /// 产物要落回原文件所在的子目录，否则子目录里的同名文件会在根目录互相覆盖。
+  /// 目录不存在时平台侧会创建；创建失败会抛错（宁可报错也不静默写错位置）。
+  ///
+  /// 用户中途取消时抛 [SafWriteCancelledException]（界面显示「已取消」）。
   static Future<String> writeToTree({
     required String treeUri,
     required String name,
     required String sourcePath,
+    String relativeDir = '',
   }) async {
-    final result = await _channel.invokeMethod<String>('writeToTree', {
-      'treeUri': treeUri,
-      'name': name,
-      'sourcePath': sourcePath,
-    });
+    final String? result;
+    try {
+      result = await _channel.invokeMethod<String>('writeToTree', {
+        'treeUri': treeUri,
+        'name': name,
+        'sourcePath': sourcePath,
+        if (relativeDir.isNotEmpty) 'relativeDir': relativeDir,
+      });
+    } on PlatformException catch (e) {
+      if (e.code == SafWriteCancelledException.code) {
+        throw const SafWriteCancelledException();
+      }
+      rethrow;
+    }
     if (result == null || result.isEmpty) {
       throw StateError('写入失败（平台未返回文档 URI）');
     }
@@ -121,18 +150,35 @@ class AndroidPlatform {
   }
 
   /// 保存到公共「下载/MP4Fix」目录（Android 10+ 无需权限），返回展示路径。
+  ///
+  /// [relativeDir] 会被镜像到 `下载/MP4Fix/<relativeDir>/` 下。
   static Future<String> saveToDownloads({
     required String name,
     required String sourcePath,
+    String relativeDir = '',
   }) async {
     final result = await _channel.invokeMethod<String>('saveToDownloads', {
       'name': name,
       'sourcePath': sourcePath,
+      if (relativeDir.isNotEmpty) 'relativeDir': relativeDir,
     });
     if (result == null || result.isEmpty) {
       throw StateError('保存失败（平台未返回路径）');
     }
     return result;
+  }
+
+  /// 用户取消时中断平台侧的大文件写入 / 复制（SAF 落位、下载目录落位、复制到缓存）。
+  ///
+  /// 这些复制在 Kotlin 侧逐块检查取消标记，中断后原文件不会有任何改动
+  /// （`.part` 被删除、`.bak` 被还原、缓存里的半成品被清掉）。
+  static Future<void> cancelPlatformWrite() async {
+    if (!isSupported) return;
+    try {
+      await _channel.invokeMethod<void>('cancelPlatformWrite');
+    } catch (_) {
+      // 忽略：取消只是尽力而为，任务本身仍会在下个文件处停下
+    }
   }
 
   /// 删除文档（尽力而为，失败不抛错）。
@@ -144,14 +190,15 @@ class AndroidPlatform {
     }
   }
 
-  /// 指定 SAF 文件夹里是否已存在 [name]（修复记录校验用）。
+  /// 指定 SAF 文件夹里是否已存在 [relativePath]（修复记录校验用）。
   ///
-  /// 查询失败时返回 true —— "不确定"就当作产物还在，不要平白让复用失效。
-  static Future<bool> existsInTree(String treeUri, String name) async {
+  /// [relativePath] 可以带子目录（`sub/a.mp4`），平台侧按段查找。
+  /// 查询失败时返回 true ——"不确定"就当作产物还在，不要平白让复用失效。
+  static Future<bool> existsInTree(String treeUri, String relativePath) async {
     try {
       final result = await _channel.invokeMethod<bool>('existsInTree', {
         'treeUri': treeUri,
-        'name': name,
+        'name': relativePath,
       });
       return result ?? true;
     } catch (_) {
@@ -211,17 +258,36 @@ class AndroidPlatform {
     }
   }
 
-  /// 公共「下载/MP4Fix」里是否已存在 [name]（修复记录校验用）。
+  /// 公共「下载/MP4Fix」里是否已存在 [relativePath]（修复记录校验用）。
   ///
+  /// [relativePath] 可以带子目录（`sub/a.mp4`）。
   /// 查询失败时返回 true（同上）。
-  static Future<bool> existsInDownloads(String name) async {
+  static Future<bool> existsInDownloads(String relativePath) async {
     try {
       final result = await _channel.invokeMethod<bool>('existsInDownloads', {
-        'name': name,
+        'name': relativePath,
       });
       return result ?? true;
     } catch (_) {
       return true;
+    }
+  }
+
+  /// 读取默认网关（一般就是路由器 IP）；读不到返回 null。
+  ///
+  /// 走 `ConnectivityManager.linkProperties` —— Android 10 起普通应用已经读不到
+  /// `/proc/net/route`（SELinux 拦截），这是唯一稳的官方接口。只声明
+  /// `ACCESS_NETWORK_STATE` 普通权限，不会弹授权框。
+  static Future<String?> defaultGateway() async {
+    try {
+      final value = await _channel.invokeMethod<String>('defaultGateway');
+      final trimmed = value?.trim();
+      if (trimmed == null || trimmed.isEmpty || trimmed == '0.0.0.0') {
+        return null;
+      }
+      return trimmed;
+    } catch (_) {
+      return null;
     }
   }
 

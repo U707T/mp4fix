@@ -16,4 +16,14 @@ class AppScope extends InheritedNotifier<AppController> {
     assert(scope != null, 'AppScope 未挂载');
     return scope!.notifier!;
   }
+
+  /// 只读一次、**不建立依赖**（生命周期回调 / 事件处理里用）。
+  ///
+  /// [of] 会注册依赖，只能在 build / didChangeDependencies 里调用；
+  /// 在 `didChangeAppLifecycleState` 这类地方用它会被断言拦住。
+  static AppController read(BuildContext context) {
+    final scope = context.getInheritedWidgetOfExactType<AppScope>();
+    assert(scope != null, 'AppScope 未挂载');
+    return scope!.notifier!;
+  }
 }

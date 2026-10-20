@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../platform/default_gateway.dart';
 import '../app_controller.dart';
 import '../app_scope.dart';
 import '../models.dart';
@@ -23,6 +24,7 @@ class _WebDavPageState extends State<WebDavPage> {
   late TextEditingController _pass;
   bool _seeded = false;
   bool _uploadCopies = true;
+  bool _gatewayLoading = false;
   JobFilter _filter = JobFilter.all;
   String _status = '';
   StatusTone _statusTone = StatusTone.neutral;
@@ -61,6 +63,43 @@ class _WebDavPageState extends State<WebDavPage> {
         _statusTone = StatusTone.bad;
       });
     }
+  }
+
+  /// 读取默认网关（一般就是路由器 IP）填进主机栏，省得手动去系统设置里查。
+  ///
+  /// 只填主机、不动端口 / 路径：网关是路由器时用户名密码也未必一样，
+  /// 用户点「测试」就知道通不通。
+  Future<void> _fillDefaultGateway(AppController controller) async {
+    if (_gatewayLoading) return;
+    setState(() {
+      _gatewayLoading = true;
+      _status = '正在读取默认网关…';
+      _statusTone = StatusTone.neutral;
+    });
+
+    final gateway = await getDefaultGateway();
+    if (!mounted) return;
+
+    if (gateway == null) {
+      setState(() {
+        _gatewayLoading = false;
+        _status = '读不到默认网关（可手动填写主机地址）';
+        _statusTone = StatusTone.bad;
+      });
+      return;
+    }
+
+    _host.value = TextEditingValue(
+      text: gateway,
+      selection: TextSelection.collapsed(offset: gateway.length),
+    );
+    controller.updateSettings((s) => s.webdav.host = gateway);
+    setState(() {
+      _gatewayLoading = false;
+      _status = '已填入默认网关 $gateway'
+          '（服务器不是路由器时请改成实际 IP）';
+      _statusTone = StatusTone.good;
+    });
   }
 
   @override
@@ -134,9 +173,36 @@ class _WebDavPageState extends State<WebDavPage> {
                   child: TextField(
                     controller: _host,
                     enabled: canRun,
-                    decoration: const InputDecoration(
+                    decoration: InputDecoration(
                       labelText: '主机',
                       isDense: true,
+                      // 「读取默认网关」小闪电：填路由器地址，省得手动查 IP。
+                      // 最小尺寸压到 32，少占一点输入宽度。
+                      suffixIconConstraints: const BoxConstraints(
+                        minWidth: 32,
+                        minHeight: 32,
+                      ),
+                      suffixIcon: IconButton(
+                        tooltip: '读取默认网关，快速填入主机',
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                        iconSize: 20,
+                        onPressed: _gatewayLoading || !canRun
+                            ? null
+                            : () => _fillDefaultGateway(controller),
+                        icon: _gatewayLoading
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : Icon(
+                                Icons.bolt_rounded,
+                                size: 20,
+                                color: scheme.primary,
+                              ),
+                      ),
                     ),
                     onChanged: (v) =>
                         controller.updateSettings((s) => s.webdav.host = v),

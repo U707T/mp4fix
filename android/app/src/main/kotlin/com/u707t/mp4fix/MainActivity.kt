@@ -2,6 +2,8 @@ package com.u707t.mp4fix
 
 import android.content.ContentUris
 import android.content.ContentValues
+import android.content.Context
+import android.net.ConnectivityManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -19,6 +21,7 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
 import java.io.IOException
+import java.net.Inet4Address
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 
@@ -68,8 +71,21 @@ class MainActivity : FlutterActivity() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * 落位取消标记（SAF 写入 / 下载目录写入）。
+     *
+     * 这些写入动辄几百 MB 到几 GB，`copyTo` 期间 Dart 侧再怎么置取消标记都没用 ——
+     * 用户点了「停止」只能干等到复制结束。写入循环里检查这个标记就能及时中断，
+     * 而且中断时原文件没有任何改动（`.part` 会被删掉、`.bak` 会还原）。
+     */
+    private val cancelWrite = java.util.concurrent.atomic.AtomicBoolean(false)
+
     private fun handle(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            "cancelPlatformWrite" -> {
+                cancelWrite.set(true)
+                result.success(null)
+            }
             "writeToTree" -> {
                 val tree = call.argument<String>("treeUri")?.let(Uri::parse)
                 val name = call.argument<String>("name")
@@ -78,7 +94,10 @@ class MainActivity : FlutterActivity() {
                     result.error("bad_args", "缺少参数", null)
                     return
                 }
-                runInBackground(result) { writeToTree(tree, name, File(sourcePath)).toString() }
+                val relativeDir = call.argument<String>("relativeDir")
+                runInBackground(result) {
+                    writeToTree(tree, name, File(sourcePath), relativeDir).toString()
+                }
             }
 
             "copyToCache" -> {
@@ -107,7 +126,8 @@ class MainActivity : FlutterActivity() {
                     result.error("bad_args", "缺少参数", null)
                     return
                 }
-                runInBackground(result) { saveToDownloads(name, File(sourcePath)) }
+                val relativeDir = call.argument<String>("relativeDir")
+                runInBackground(result) { saveToDownloads(name, File(sourcePath), relativeDir) }
             }
 
             "deleteDocument" -> {
@@ -155,18 +175,23 @@ class MainActivity : FlutterActivity() {
                     return
                 }
                 val exists = runCatching {
-                    findChild(tree, parentDocumentUri(tree), name) != null
+                    findRelative(tree, name) != null
                 }.getOrElse { true } // 查询失败当作"还在"，别平白让复用失效
                 result.success(exists)
             }
 
             "existsInDownloads" -> {
-                val name = call.argument<String>("name")
-                if (name.isNullOrBlank()) {
+                val raw = call.argument<String>("name")
+                if (raw.isNullOrBlank()) {
                     result.error("bad_args", "缺少参数", null)
                     return
                 }
-                val exists = runCatching { findDownload(name) != null }
+                // name 可能是带子目录的相对路径（`sub/a.mp4`）
+                val rel = raw.replace('\\', '/').trim('/')
+                val slash = rel.lastIndexOf('/')
+                val dir = if (slash >= 0) rel.substring(0, slash) else null
+                val file = if (slash >= 0) rel.substring(slash + 1) else rel
+                val exists = runCatching { findDownload(file, dir) != null }
                     .getOrElse { true }
                 result.success(exists)
             }
@@ -196,6 +221,9 @@ class MainActivity : FlutterActivity() {
                 result.success(null)
             }
 
+            // WebDAV 主机栏的「读取默认网关」按钮：快速取本机所在网段的地址。
+            "defaultGateway" -> result.success(defaultGateway())
+
             "readLastCrash" -> {
                 val crash = try {
                     val f = File(filesDir, CRASH_FILE)
@@ -213,6 +241,29 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /**
+     * 默认网关（一般就是路由器地址），读不到返回 null。
+     *
+     * WebDAV 主机栏的「读取默认网关」按钮用它快速取本机所在网段的地址。
+     * 走 ConnectivityManager 而不是 `/proc/net/route`：Android 10 起普通应用读
+     * `/proc/net/route` 会被 SELinux 拒掉，而 LinkProperties 是官方接口；
+     * `ACCESS_NETWORK_STATE` 是普通权限，装包即授予，不会弹授权框。
+     */
+    private fun defaultGateway(): String? = runCatching {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = cm.activeNetwork ?: return@runCatching null
+        val props = cm.getLinkProperties(network) ?: return@runCatching null
+        props.routes
+            .firstOrNull { route ->
+                val gateway = route.gateway
+                route.isDefaultRoute &&
+                    gateway is Inet4Address &&
+                    !gateway.isAnyLocalAddress
+            }
+            ?.gateway
+            ?.hostAddress
+    }.getOrNull()
+
     /// 在后台线程执行大文件 IO，结果回主线程（避免 ANR）。
     private fun runInBackground(
         result: MethodChannel.Result,
@@ -227,11 +278,36 @@ class MainActivity : FlutterActivity() {
                 mainHandler.post {
                     result.error("not_seekable", e.message ?: "not seekable", null)
                 }
+            } catch (e: WriteCancelledException) {
+                // 用户取消：不是失败，Dart 侧显示「已取消（原文件未改动）」
+                mainHandler.post {
+                    result.error("cancelled", e.message ?: "已取消", null)
+                }
             } catch (e: Exception) {
                 val message = e.message ?: e.javaClass.simpleName
                 mainHandler.post { result.error("platform_error", message, null) }
             }
         }.start()
+    }
+
+    /** 用户在落位途中点了「停止」。 */
+    private class WriteCancelledException(message: String) : IOException(message)
+
+    /**
+     * 边复制边检查取消标记。取消时抛 [WriteCancelledException]，
+     * 调用方负责清理半成品并还原原文件。
+     */
+    private fun copyCancellable(
+        input: java.io.InputStream,
+        output: java.io.OutputStream,
+    ) {
+        val buf = ByteArray(1 shl 20)
+        while (true) {
+            if (cancelWrite.get()) throw WriteCancelledException("已取消（原文件未改动）")
+            val n = input.read(buf)
+            if (n < 0) break
+            output.write(buf, 0, n)
+        }
     }
 
     // ---------------------------------------------------------------- SAF 写入
@@ -257,18 +333,26 @@ class MainActivity : FlutterActivity() {
      * 另外：若正式名最终仍然缺失，`.bak` 一律保留（绝不删除），
      * 宁可留一个 `.bak` 让用户手动改回，也不能让数据消失。
      */
-    private fun writeToTree(tree: Uri, name: String, source: File): Uri {
+    private fun writeToTree(
+        tree: Uri,
+        name: String,
+        source: File,
+        relativeDir: String? = null,
+    ): Uri {
         val resolver = contentResolver
-        val parent = parentDocumentUri(tree)
+        // 递归扫描文件夹时产物要落回原子目录。目录按需创建；建不出来就**报错**，
+        // 绝不静默写到根目录 —— 那样只是把「子目录同名文件互相覆盖」的问题藏起来。
+        val parent = resolveParent(tree, relativeDir)
         val partName = "$name.mp4fix-part"
         val backupName = "$name.mp4fix-bak"
+        cancelWrite.set(false)
 
         // ---- 1) 写 .part（此时原文件还没被碰过，失败也不影响它）----
         val partUri = findChild(tree, parent, partName)
             ?: createDocument(tree, parent, partName)
         try {
             resolver.openOutputStream(partUri, "wt")?.use { out ->
-                source.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
+                source.inputStream().use { input -> copyCancellable(input, out) }
             } ?: throw IOException("无法打开输出流（所选文件夹不可写）")
         } catch (e: Exception) {
             runCatching { DocumentsContract.deleteDocument(resolver, partUri) }
@@ -309,10 +393,12 @@ class MainActivity : FlutterActivity() {
         }
 
         // ---- 4) .part → 正式名，并复核 ----
-        val renameOk = runCatching {
-            DocumentsContract.renameDocument(resolver, partUri, name)
-        }.getOrNull() != null
-        var finalUri: Uri? = if (renameOk) findChild(tree, parent, name) else null
+        // 不信 renameDocument 的返回值：部分提供方（百度网盘 / 国产 ROM）改名成功
+        // 却返回 null。旧逻辑据此判定「改名失败」→ 走新建+复制兜底 → 而 .part
+        // 已经不存在了，复制必然失败 → 回滚原文件并报错。用户看到的是「修完了但
+        // 说失败」，其实是白干一次。这里一律以「文件系统里到底有没有」为准。
+        runCatching { DocumentsContract.renameDocument(resolver, partUri, name) }
+        var finalUri: Uri? = findChild(tree, parent, name)
 
         if (finalUri == null) {
             // 改名不可用 / 没生效 → 退化为「新建正式文件 + 复制内容」
@@ -325,7 +411,7 @@ class MainActivity : FlutterActivity() {
             try {
                 val copied = resolver.openInputStream(partUri)?.use { input ->
                     resolver.openOutputStream(target, "wt")?.use { out ->
-                        input.copyTo(out, 1 shl 20)
+                        copyCancellable(input, out)
                     } ?: throw IOException("无法写入新文件")
                     true
                 } ?: throw IOException("无法读取临时文件")
@@ -476,6 +562,50 @@ class MainActivity : FlutterActivity() {
     }
 
 
+    /**
+     * 按相对路径解析（并按需创建）目录。
+     *
+     * `relativeDir` 为空 → 树根。任一段创建失败就抛错：宁可让这个文件报
+     * 「无法创建子目录」，也不要把产物写到错误的目录里（那会覆盖同名文件）。
+     */
+    private fun resolveParent(tree: Uri, relativeDir: String?): Uri {
+        val root = parentDocumentUri(tree)
+        if (relativeDir.isNullOrBlank()) return root
+        var current = root
+        for (segment in relativeDir.split('/', '\\')) {
+            if (segment.isBlank() || segment == ".") continue
+            if (segment == "..") throw IOException("拒绝写入上级目录（$relativeDir）")
+            val existing = findChild(tree, current, segment)
+            current = existing
+                ?: runCatching { createDirectory(tree, current, segment) }.getOrNull()
+                ?: throw IOException(
+                    "无法在所选文件夹创建子目录「$segment」（该存储可能不支持建目录）"
+                )
+        }
+        return current
+    }
+
+    /** 按相对路径逐段查找（`sub/a.mp4` → 子目录里的 a.mp4）。 */
+    private fun findRelative(tree: Uri, relativePath: String): Uri? {
+        val segments = relativePath.split('/', '\\').filter { it.isNotBlank() }
+        if (segments.isEmpty()) return null
+        var current = parentDocumentUri(tree)
+        for (i in segments.indices) {
+            val child = findChild(tree, current, segments[i]) ?: return null
+            if (i == segments.lastIndex) return child
+            current = child
+        }
+        return null
+    }
+
+    private fun createDirectory(tree: Uri, parent: Uri, name: String): Uri? =
+        DocumentsContract.createDocument(
+            contentResolver,
+            parent,
+            DocumentsContract.Document.MIME_TYPE_DIR,
+            name,
+        )
+
     private fun parentDocumentUri(tree: Uri): Uri = try {
         DocumentsContract.buildDocumentUriUsingTree(
             tree, DocumentsContract.getTreeDocumentId(tree)
@@ -540,16 +670,22 @@ class MainActivity : FlutterActivity() {
      * 同名时直接覆盖旧产物 —— 否则 MediaStore 会自动改名成 "xxx (1).mp4"，
      * 反复修复同一部片子就会在下载目录里堆出一串副本。
      */
-    private fun saveToDownloads(name: String, source: File): String {
+    private fun saveToDownloads(
+        name: String,
+        source: File,
+        relativeDir: String? = null,
+    ): String {
         val resolver = contentResolver
+        cancelWrite.set(false)
+        val relDir = mediaRelDir(relativeDir)
         if (Build.VERSION.SDK_INT >= 29) {
-            val existing = findDownload(name)
+            val existing = findDownload(name, relativeDir)
             if (existing != null) {
                 try {
                     resolver.openOutputStream(existing, "wt")?.use { out ->
-                        source.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
+                        source.inputStream().use { input -> copyCancellable(input, out) }
                     } ?: throw IOException("无法写入下载目录")
-                    return "下载/MP4Fix/$name"
+                    return "$relDir$name"
                 } catch (e: Exception) {
                     // 覆盖失败：删掉旧文件后走下面的新建流程
                     runCatching { resolver.delete(existing, null, null) }
@@ -558,17 +694,14 @@ class MainActivity : FlutterActivity() {
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
-                put(
-                    MediaStore.MediaColumns.RELATIVE_PATH,
-                    Environment.DIRECTORY_DOWNLOADS + "/MP4Fix",
-                )
+                put(MediaStore.MediaColumns.RELATIVE_PATH, relDir)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
                 ?: throw IOException("无法在下载目录创建文件")
             try {
                 resolver.openOutputStream(uri, "w")?.use { out ->
-                    source.inputStream().use { input -> input.copyTo(out, 1 shl 20) }
+                    source.inputStream().use { input -> copyCancellable(input, out) }
                 } ?: throw IOException("无法写入下载目录")
             } catch (e: Exception) {
                 runCatching { resolver.delete(uri, null, null) }
@@ -580,19 +713,40 @@ class MainActivity : FlutterActivity() {
                 null,
                 null,
             )
-            return "下载/MP4Fix/$name"
+            return "$relDir$name"
         }
-        val dir = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "MP4Fix")
+        val base = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "MP4Fix")
+        val dir = if (relativeDir.isNullOrBlank()) base else File(base, relativeDir)
         if (!dir.exists()) dir.mkdirs()
         val out = File(dir, name)
-        source.inputStream().use { input ->
-            out.outputStream().buffered(1 shl 20).use { o -> input.copyTo(o, 1 shl 20) }
+        try {
+            source.inputStream().use { input ->
+                out.outputStream().buffered(1 shl 20).use { o -> copyCancellable(input, o) }
+            }
+        } catch (e: Exception) {
+            runCatching { out.delete() }
+            throw e
         }
         return out.absolutePath
     }
 
+    /** 下载目录的相对路径（MediaStore 要求以 `/` 结尾）。 */
+    private fun mediaRelDir(relativeDir: String?): String {
+        val base = Environment.DIRECTORY_DOWNLOADS + "/MP4Fix"
+        val sub = relativeDir?.trim()?.replace('\\', '/')?.trim('/') ?: ""
+        return if (sub.isEmpty()) "$base/" else "$base/$sub/"
+    }
+
+    /** 把 RELATIVE_PATH 归一化后比较（有的提供方会带尾斜杠 / 反斜杠）。 */
+    private fun sameRelPath(a: String?, b: String): Boolean {
+        if (a == null) return false
+        val na = a.replace('\\', '/').trim('/')
+        val nb = b.replace('\\', '/').trim('/')
+        return na.equals(nb, ignoreCase = true)
+    }
+
     /** 在「下载/MP4Fix」里找同名文件（Android 10+）。 */
-    private fun findDownload(name: String): Uri? {
+    private fun findDownload(name: String, relativeDir: String? = null): Uri? {
         if (Build.VERSION.SDK_INT >= 29) {
             val collection = MediaStore.Downloads.EXTERNAL_CONTENT_URI
             val projection = arrayOf(
@@ -612,6 +766,7 @@ class MainActivity : FlutterActivity() {
                     while (c.moveToNext()) {
                         val rel = if (pathCol >= 0) c.getString(pathCol) else null
                         if (rel == null || !rel.contains("MP4Fix")) continue
+                        if (!sameRelPath(rel, mediaRelDir(relativeDir))) continue
                         return ContentUris.withAppendedId(collection, c.getLong(idCol))
                     }
                 }
@@ -620,7 +775,8 @@ class MainActivity : FlutterActivity() {
             }
             return null
         }
-        val dir = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "MP4Fix")
+        val base = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "MP4Fix")
+        val dir = if (relativeDir.isNullOrBlank()) base else File(base, relativeDir)
         return if (File(dir, name).exists()) Uri.fromFile(File(dir, name)) else null
     }
 
@@ -760,9 +916,16 @@ class MainActivity : FlutterActivity() {
         val dir = File(cacheDir, "imports").apply { mkdirs() }
         val safeName = name.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(120)
         val out = File(dir, "${System.nanoTime()}-$safeName")
-        contentResolver.openInputStream(uri)?.use { input ->
-            out.outputStream().buffered(1 shl 20).use { o -> input.copyTo(o, 1 shl 20) }
-        } ?: throw IOException("无法读取 $uri")
+        cancelWrite.set(false)
+        try {
+            contentResolver.openInputStream(uri)?.use { input ->
+                out.outputStream().buffered(1 shl 20).use { o -> copyCancellable(input, o) }
+            } ?: throw IOException("无法读取 $uri")
+        } catch (e: Exception) {
+            // 取消 / 失败都别把半成品留在缓存里
+            runCatching { out.delete() }
+            throw e
+        }
         return out.absolutePath
     }
 

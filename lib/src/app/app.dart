@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 
@@ -18,8 +19,36 @@ class Mp4FixApp extends StatelessWidget {
   }
 }
 
-class _AppRoot extends StatelessWidget {
+class _AppRoot extends StatefulWidget {
   const _AppRoot();
+
+  @override
+  State<_AppRoot> createState() => _AppRootState();
+}
+
+class _AppRootState extends State<_AppRoot> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 去抖后的设置还没来得及落盘就切后台 / 退出 → 立刻补一次，
+    // 否则用户刚改的 WebDAV 配置或「记住密码」会丢。
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.detached) {
+      final controller = AppScope.read(context);
+      unawaited(controller.flushSettings());
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../engine/engine.dart';
+import '../platform/android_platform.dart';
 import 'defaults.dart';
 
 /// 任务来源（对应三个功能入口）。
@@ -179,6 +180,7 @@ bool _hasErrno(String text, int errno) =>
 
 /// 统一的错误文案：常见 IO 错误给出可操作的中文提示，其余去掉异常类型前缀。
 String describeError(Object e) {
+  if (e is SafWriteCancelledException) return '已取消（原文件未改动）';
   final raw = e.toString();
   // Windows: 2/3 = 找不到文件/路径；5 = 拒绝访问；32 = 被占用；112 = 磁盘已满
   // 注意用 \b 限定：'errno = 2' 是 'errno = 28' 的子串，直接 contains 会误判
@@ -212,6 +214,19 @@ String describeError(Object e) {
   );
 }
 
+/// 从展示路径里取出相对目录（统一用 `/` 分隔；根目录返回空串）。
+///
+/// `sub/dir/a.mp4` → `sub/dir`；`sub\dir\a.mp4`（Windows）→ `sub/dir`；
+/// `a.mp4` → `''`。
+String relativeDirOf(String displayPath) {
+  final parts = displayPath
+      .split(RegExp(r'[\\/]'))
+      .where((p) => p.isNotEmpty)
+      .toList(growable: false);
+  if (parts.length <= 1) return '';
+  return parts.sublist(0, parts.length - 1).join('/');
+}
+
 /// 列表里的一条任务（对应一个视频文件）。
 class FixJob {
   FixJob({
@@ -224,6 +239,7 @@ class FixJob {
     this.webDavUrl,
     this.sourceUri,
     this.modifiedMs = 0,
+    this.relDir = '',
   });
 
   final String id;
@@ -246,6 +262,14 @@ class FixJob {
   /// 文件的最后修改时间（毫秒；0 = 未知）。
   /// 与 [size] 一起构成修复记录的指纹 —— 文件一变，记录自动失效。
   int modifiedMs;
+
+  /// 相对目录（`''` = 输出根目录）。
+  ///
+  /// 递归扫描一个文件夹时，`sub/a.mp4` 与 `sub2/a.mp4` 是**两个不同的文件**。
+  /// 以前输出只按文件名落位，两个都会被写到输出根目录的同名路径上 —— 后一个
+  /// 直接把前一个覆盖掉（就地覆盖模式下还会在根目录多出一份）。现在带上相对
+  /// 目录，产物落到对应的子目录里（目录不存在会自动创建）。
+  final String relDir;
 
   JobStatus status = JobStatus.pending;
   String message = '';

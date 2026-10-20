@@ -240,20 +240,39 @@ class JobSummaryBar extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     if (jobs.isEmpty) return const SizedBox.shrink();
 
-    int count(JobStatus s) => jobs.where((j) => j.status == s).length;
-    final running = jobs.where((j) => j.status.busy).length;
-    final pending = jobs.where((j) => j.status == JobStatus.pending).length;
-    final fixableCount = this.fixableCount ?? jobs.where((j) => j.status.fixable).length;
-    final doneCount = jobs.where((j) => j.status.finished).length;
-    final problemCount = jobs.where((j) => j.status.problematic).length;
+    // 一次遍历算完所有计数。
+    // 以前每个筛选项各 `jobs.where(...)` 一遍（6 遍）、汇总条再各算一遍（7 遍）——
+    // 文件夹里几千个视频时，每次界面刷新就是几万次比较，扫描期间会明显掉帧。
+    final byStatus = <JobStatus, int>{};
+    for (final j in jobs) {
+      byStatus.update(j.status, (v) => v + 1, ifAbsent: () => 1);
+    }
+    int countOf(JobStatus s) => byStatus[s] ?? 0;
+    int sumWhere(bool Function(JobStatus) test) {
+      var n = 0;
+      byStatus.forEach((status, count) {
+        if (test(status)) n += count;
+      });
+      return n;
+    }
+
+    final running = sumWhere((s) => s.busy);
+    final pending = countOf(JobStatus.pending);
+    final fixableCount =
+        this.fixableCount ?? sumWhere((s) => s.fixable);
+    final doneCount = sumWhere((s) => s.finished);
+    final problemCount = sumWhere((s) => s.problematic);
+    final okCount = countOf(JobStatus.ok);
+    final needsFixCount = countOf(JobStatus.needsFix);
+    final optimizableCount = countOf(JobStatus.optimizable);
 
     final parts = <String>[
       '共 ${jobs.length}',
       if (running > 0) '进行中 $running',
       if (pending > 0) '待处理 $pending',
-      if (count(JobStatus.ok) > 0) '正常 ${count(JobStatus.ok)}',
-      if (count(JobStatus.needsFix) > 0) '需重排 ${count(JobStatus.needsFix)}',
-      if (count(JobStatus.optimizable) > 0) '可优化 ${count(JobStatus.optimizable)}',
+      if (okCount > 0) '正常 $okCount',
+      if (needsFixCount > 0) '需重排 $needsFixCount',
+      if (optimizableCount > 0) '可优化 $optimizableCount',
       if (doneCount > 0) '已完成 $doneCount',
       if (problemCount > 0) '问题 $problemCount',
     ];
@@ -343,10 +362,18 @@ class JobFilterBar extends StatelessWidget {
   Widget build(BuildContext context) {
     if (jobs.isEmpty) return const SizedBox.shrink();
     final scheme = Theme.of(context).colorScheme;
-    final counts = <JobFilter, int>{
-      for (final filter in JobFilter.values)
-        filter: jobs.where((j) => filter.matches(j.status)).length,
-    };
+    // 同样一次遍历：`JobFilter.values.length` 次 where 在几千个任务时并不便宜
+    final byStatus = <JobStatus, int>{};
+    final byFilter = <JobFilter, int>{for (final f in JobFilter.values) f: 0};
+    for (final j in jobs) {
+      byStatus.update(j.status, (v) => v + 1, ifAbsent: () => 1);
+    }
+    for (final entry in byStatus.entries) {
+      for (final f in JobFilter.values) {
+        if (f.matches(entry.key)) byFilter[f] = byFilter[f]! + entry.value;
+      }
+    }
+    final counts = byFilter;
     return SizedBox(
       height: 44,
       child: ListView(
@@ -376,6 +403,47 @@ class JobFilterBar extends StatelessWidget {
   }
 }
 
+
+/// 顶部提示条（最近一次操作的结果 / 汇总）：可关闭。
+///
+/// 提示不会自动消失（批量结果用户可能还想回看），但必须能手动收起来 ——
+/// 否则它会一直占着列表上方的位置，越用越挤。
+class NoticeStrip extends StatelessWidget {
+  const NoticeStrip({
+    super.key,
+    required this.text,
+    required this.onClose,
+    this.tone = StatusTone.warn,
+    this.icon = Icons.info_outline_rounded,
+  });
+
+  final String text;
+  final VoidCallback onClose;
+  final StatusTone tone;
+  final IconData icon;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(
+      Insets.page,
+      Insets.gap,
+      Insets.page,
+      0,
+    ),
+    child: StatusStrip(
+      icon: icon,
+      text: text,
+      tone: tone,
+      trailing: IconButton(
+        tooltip: '关闭提示',
+        visualDensity: VisualDensity.compact,
+        iconSize: Insets.iconSmall,
+        icon: const Icon(Icons.close_rounded),
+        onPressed: onClose,
+      ),
+    ),
+  );
+}
 
 /// 空状态（统一图标 / 文案 / 间距）。
 class EmptyHint extends StatelessWidget {

@@ -11,7 +11,10 @@ abstract class OutputTarget {
   String get describe;
 
   /// 把 [source] 保存为 [name]（同名覆盖），返回展示位置。
-  Future<String> save(File source, String name);
+  ///
+  /// [subDir] 是相对目录（`''` = 根）。递归扫描文件夹时必须传它 —— 否则子目录
+  /// 里的同名文件会在输出根目录上互相覆盖。
+  Future<String> save(File source, String name, {String subDir = ''});
 
   /// 修复记录里的位置类型（dir / saf / downloads）。
   String get ledgerKind;
@@ -93,7 +96,9 @@ class DirectoryOutputTarget implements OutputTarget {
   String? get localDirectory => dir.path;
 
   @override
-  Future<String> save(File source, String name) async {
+  Future<String> save(File source, String name, {String subDir = ''}) async {
+    // 子目录按需创建（`a/b/c` 也会一次建出来）
+    final dir = subDir.isEmpty ? this.dir : Directory('${this.dir.path}/$subDir');
     dir.createSync(recursive: true);
     final target = File('${dir.path}${Platform.pathSeparator}$name');
 
@@ -149,13 +154,14 @@ class SafOutputTarget implements OutputTarget {
   String? get localDirectory => null;
 
   @override
-  Future<String> save(File source, String name) async {
+  Future<String> save(File source, String name, {String subDir = ''}) async {
     await AndroidPlatform.writeToTree(
       treeUri: treeUri,
       name: name,
       sourcePath: source.path,
+      relativeDir: subDir,
     );
-    return name;
+    return subDir.isEmpty ? name : '$subDir/$name';
   }
 }
 
@@ -176,10 +182,12 @@ class DownloadsOutputTarget implements OutputTarget {
   String? get localDirectory => null;
 
   @override
-  Future<String> save(File source, String name) => AndroidPlatform.saveToDownloads(
-    name: name,
-    sourcePath: source.path,
-  );
+  Future<String> save(File source, String name, {String subDir = ''}) =>
+      AndroidPlatform.saveToDownloads(
+        name: name,
+        sourcePath: source.path,
+        relativeDir: subDir,
+      );
 }
 
 /// 兜底 / 桌面默认：`下载/MP4Fix`（找不到下载目录时退回应用文档目录）。

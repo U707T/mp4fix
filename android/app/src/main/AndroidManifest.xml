@@ -2,6 +2,11 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <!--
+      WebDAV 主机栏的「读取默认网关」按钮：读取当前网络的默认路由（路由器地址）。
+      普通权限，装包即授予，不弹授权框。
+    -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!--
       批量修复期间的前台服务（dataSync）：Android 12+ 会很快冻结后台的缓存进程，
       长任务（几 GB 的本地修复 / WebDAV 传输）切到后台就会被挂起。低优先级通知
       不打扰用户；没有 POST_NOTIFICATIONS 也能跑（只是通知不显示）。
