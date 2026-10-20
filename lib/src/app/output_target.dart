@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:path_provider/path_provider.dart';
 
@@ -77,6 +78,23 @@ String? validateRepairOutput(File output, {int expectedBytes = 0}) {
     input?.close();
   }
 }
+
+/// 在后台 Isolate 中校验产物（避免大 moov 解析卡住 UI）。
+///
+/// 单独抽成顶层函数：闭包只捕获路径与预期大小两个原始值。
+/// 直接在业务方法里写 `Isolate.run(() => validate(...))` 时，Dart 可能把
+/// 外层上下文（`RepairTask` 里的 Completer / ReceivePort）一起捕获，
+/// 导致 “Illegal argument in isolate message: object is unsendable”。
+Future<String?> validateRepairOutputInIsolate(
+  File output, {
+  int expectedBytes = 0,
+}) {
+  final path = output.path;
+  return Isolate.run(() => _validateRepairOutputPath(path, expectedBytes));
+}
+
+String? _validateRepairOutputPath(String path, int expectedBytes) =>
+    validateRepairOutput(File(path), expectedBytes: expectedBytes);
 
 /// 普通目录（桌面 / 应用文档目录回退）。
 class DirectoryOutputTarget implements OutputTarget {

@@ -328,6 +328,12 @@ class WebDavClient {
     void Function(int sent, int total)? onUpload,
     bool Function()? isCancelled,
   }) async {
+    // 认证只发给「配置的根主机」：服务器返回的 href / 重定向都可能指向
+    // 第三方主机，不能把 Basic 凭据跟着带过去。同一主机 http → https
+    // 升级是安全的，照常携带。
+    final rootUri = Uri.tryParse(root);
+    final authHost = rootUri?.host;
+    final authScheme = rootUri?.scheme.toLowerCase();
     var current = url;
     var redirects = 0;
     while (true) {
@@ -348,7 +354,15 @@ class WebDavClient {
         request.followRedirects = false;
         request.headers.set(HttpHeaders.userAgentHeader, _userAgent);
         request.headers.set(HttpHeaders.acceptHeader, '*/*');
-        if (username.isNotEmpty || password.isNotEmpty) {
+        // 认证只发给「原始主机」：跨主机重定向（或 https → http 降级）
+        // 一律不带 Authorization，避免被重定向到第三方主机时泄露凭据。
+        // 同一主机 http → https 升级是安全的，照常携带。
+        final sameHost = uri.host == authHost;
+        final schemeOk = scheme == authScheme ||
+            (authScheme == 'http' && scheme == 'https');
+        if ((username.isNotEmpty || password.isNotEmpty) &&
+            sameHost &&
+            schemeOk) {
           final token = base64.encode(utf8.encode('$username:$password'));
           request.headers.set(HttpHeaders.authorizationHeader, 'Basic $token');
         }

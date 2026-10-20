@@ -163,4 +163,37 @@ void main() {
     expect(gate.available, 1);
     expect(await gate.run(() async => 42), 42);
   });
+
+  test('WeightedSemaphore：按权重占用容量，峰值不超过总容量', () async {
+    final gate = WeightedSemaphore(4);
+    var used = 0;
+    var maxUsed = 0;
+
+    Future<void> job(int weight) => gate.run(weight, () async {
+          used += weight;
+          if (used > maxUsed) maxUsed = used;
+          await Future<void>.delayed(const Duration(milliseconds: 3));
+          used -= weight;
+        });
+
+    await Future.wait([job(3), job(1), job(2), job(1)]);
+
+    expect(maxUsed, 4, reason: '3+1 可同时跑；2+1 要等前两个释放');
+    expect(gate.available, 4, reason: '全部结束后容量应归还');
+  });
+
+  test('WeightedSemaphore：单个任务权重超过容量时独占，异常也释放', () async {
+    final gate = WeightedSemaphore(2);
+    var active = 0;
+
+    await expectLater(
+      gate.run(99, () async {
+        active++;
+        throw StateError('boom');
+      }),
+      throwsStateError,
+    );
+    expect(active, 1);
+    expect(gate.available, 2, reason: '权重被夹到容量，结束后必须归还');
+  });
 }

@@ -11,7 +11,8 @@ import 'dart:collection';
 /// - [forEachBounded]：固定列表，最多 N 个同时跑；
 /// - [ParallelWindow]：边发现边投递，窗口满时等一个完成；
 /// - [TaskPool]：任务可继续投递子任务（目录遍历），投递不阻塞；
-/// - [Semaphore]：限制某类任务的同时执行数，且能返回结果。
+/// - [Semaphore]：限制某类任务的同时执行数，且能返回结果；
+/// - [WeightedSemaphore]：按权重占容量（大文件占多份缓存预算）。
 
 /// 有界并发执行 [items] 中的任务。
 ///
@@ -97,6 +98,57 @@ class ParallelWindow {
   Future<void> drain() async {
     while (_active.isNotEmpty) {
       await Future.wait(_active.toList(growable: false));
+    }
+  }
+}
+
+/// 加权信号量：按「权重」占用容量，适合「大文件占多份缓存预算」的场景。
+///
+/// 修复并行度固定为 N 时，3 个 4GB 文件会同时产生约 24GB 临时数据。
+/// 这里把容量按 1GB 折算：小文件占 1 份，大文件按体积占多份；容量不够时
+/// 排队，保证「同时占用的缓存」有上限，而不是简单地把并行度一刀切。
+class WeightedSemaphore {
+  WeightedSemaphore(int capacity) : capacity = capacity < 1 ? 1 : capacity;
+
+  /// 总容量（单位由调用方定义；本项目按 1GB 折算）。
+  final int capacity;
+
+  int _used = 0;
+  final Queue<({int weight, Completer<void> waiter})> _pending = Queue();
+
+  /// 当前剩余容量（调试 / 测试用）。
+  int get available => capacity - _used;
+
+  Future<T> run<T>(int weight, Future<T> Function() task) async {
+    final w = weight < 1 ? 1 : (weight > capacity ? capacity : weight);
+    await _acquire(w);
+    try {
+      return await task();
+    } finally {
+      _used -= w;
+      _wake();
+    }
+  }
+
+  Future<void> _acquire(int weight) {
+    // FIFO：先来先得。排队中的大任务会暂时挡住后面的小任务（队头阻塞），
+    // 这是有意的 —— 否则小任务不断插队，大任务可能永远等不到足够容量。
+    if (_pending.isEmpty && _used + weight <= capacity) {
+      _used += weight;
+      return Future<void>.value();
+    }
+    final waiter = Completer<void>();
+    _pending.add((weight: weight, waiter: waiter));
+    return waiter.future;
+  }
+
+  void _wake() {
+    while (_pending.isNotEmpty) {
+      final next = _pending.first;
+      if (_used + next.weight > capacity) break;
+      _pending.removeFirst();
+      _used += next.weight;
+      next.waiter.complete();
     }
   }
 }

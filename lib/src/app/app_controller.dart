@@ -147,6 +147,21 @@ class AppController extends ChangeNotifier {
     return picked < 1 ? 1 : (picked > cap ? cap : picked);
   }
 
+  /// 修复任务占用的缓存权重（容量单位 = 1GB）。
+  ///
+  /// 修复期间一个文件最多占「输入副本 + 修复产物」两份；按体积向上取整。
+  /// 未知大小（-1）按最小份处理。容量 = 并行度 × 2，于是：
+  /// 小文件仍能跑满并行度，3~4GB 的大文件会自动独占，避免 N 份完整缓存
+  /// 同时落到磁盘上。
+  int _repairWeight(int size, int parallel) {
+    const gb = 1 << 30;
+    if (size <= 0) return 1;
+    final units = ((size + gb - 1) ~/ gb) * 2;
+    final cap = parallel * 2;
+    if (units < 1) return 1;
+    return units > cap ? cap : units;
+  }
+
   /// 设备能力（Android 由平台通道读取；其余平台按 CPU 核数）。
   bool _lowRamDevice = false;
   int _deviceCores = 0;
@@ -1785,30 +1800,39 @@ class AppController extends ChangeNotifier {
               .toList();
       _setBatch(targets.length);
       final output = uploadCopies ? null : await outputTarget();
+      final parallel = repairParallelism;
+      // 与本地修复共用同一套「缓存预算」：WebDAV 下载 + 修复产物也是两份。
+      final gate = WeightedSemaphore(parallel * 2);
       var completed = 0;
       // 一个文件分「下载 → 修复 → 上传」三段，每段都在等网络 / 磁盘。
       // 同时跑几个文件，天然形成流水线：A 在上传时，B 已经在下一条下载。
       await forEachBounded(
         targets,
-        repairParallelism,
+        parallel,
         (job, _) async {
           if (_cancelRequested) return;
-          currentJobName = job.name;
-          activeJobCount++;
           try {
-            await _fixWebDavJob(
-              job,
-              uploadCopies: uploadCopies!,
-              fixer: fixer,
-              cache: cache,
-              output: output,
-            );
+            await gate.run(_repairWeight(job.size, parallel), () async {
+              if (_cancelRequested) return;
+              currentJobName = job.name;
+              activeJobCount++;
+              try {
+                await _fixWebDavJob(
+                  job,
+                  uploadCopies: uploadCopies!,
+                  fixer: fixer,
+                  cache: cache,
+                  output: output,
+                );
+              } finally {
+                activeJobCount--;
+              }
+            });
           } catch (e) {
             job.status = JobStatus.failed;
             job.progress = 0;
             job.message = _message(e);
           } finally {
-            activeJobCount--;
             _tickBatch(++completed);
           }
         },
@@ -1983,23 +2007,34 @@ class AppController extends ChangeNotifier {
           ? await folderOutputTarget()
           : await outputTarget();
       final cache = await _cache();
+      final parallel = repairParallelism;
+      // 缓存预算：每个文件最多同时占「输入副本 + 修复产物」两份，
+      // 按 1GB 折算；大文件自动少开，避免 3 个 4GB 文件同时产生 24GB 临时数据。
+      final gate = WeightedSemaphore(parallel * 2);
       var completed = 0;
       // 修复是「读原片 + 写产物 + 落位」的长任务，串行时磁盘几乎一直半空转。
       // 并行度默认比扫描保守（见 repairParallelism）：每个文件都占一份缓存。
       await forEachBounded(
         targets,
-        repairParallelism,
+        parallel,
         (job, _) async {
           if (_cancelRequested) return;
-          currentJobName = job.name;
-          activeJobCount++;
           try {
-            await _fixLocalJob(
-              job,
-              source: source,
-              output: output,
-              cache: cache,
-            );
+            await gate.run(_repairWeight(job.size, parallel), () async {
+              if (_cancelRequested) return;
+              currentJobName = job.name;
+              activeJobCount++;
+              try {
+                await _fixLocalJob(
+                  job,
+                  source: source,
+                  output: output,
+                  cache: cache,
+                );
+              } finally {
+                activeJobCount--;
+              }
+            });
           } catch (e) {
             // _fixLocalJob 内部已兜底；这里再拦一层，避免未知异常把任务
             // 永久留在「修复中」状态（列表看着像卡住）。
@@ -2007,7 +2042,6 @@ class AppController extends ChangeNotifier {
             job.progress = 0;
             job.message = _message(e);
           } finally {
-            activeJobCount--;
             _tickBatch(++completed);
           }
         },
@@ -2100,7 +2134,9 @@ class AppController extends ChangeNotifier {
       } else {
         // ★ 覆盖前的最后一道闸：产物必须完整可解析，否则绝不落位。
         //   覆盖是**不可逆**的 —— 就地覆盖模式下写坏了，用户的原片就没了。
-        final invalid = validateRepairOutput(
+        //   校验要读并解析 moov：放到后台 Isolate，避免并行修复时
+        //   每个产物都在 UI 线程上卡一下（大 moov 可达上百毫秒）。
+        final invalid = await validateRepairOutputInIsolate(
           tmp,
           expectedBytes: task.outputBytes,
         );

@@ -86,7 +86,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
   状态机 / 进度 / 取消 / 修复记录仍留在原来的调用方。每个文件依然先写独立缓存产物、
   校验通过才落位；「停止」会杀掉所有在跑的修复 Isolate。
 
-## 测试（198 项，`flutter test`）
+## 测试（200 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
@@ -100,7 +100,7 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
 | `fragmented_test.dart` | **分片 MP4**：检测分类 / 无损扁平化（逐样本比对，含 moov 表 + 分片混合写法）/ 距离改进 / 取消 / 截断 |
 | `android_prefetch_test.dart` | Android 只读预取协议：区间解析后直接检测；`not_seekable` 正确降级；`deviceProfile` 低内存 / 核数解析与失败回退 |
 | `default_gateway_test.dart` | 默认网关：`/proc/net/route` / `ip route` / Windows `route print` / macOS + Android 平台通道降级 |
-| `parallel_test.dart` | 并行底座：并行度上限 / 按序启动 / 取消后不再启动 / 单个失败不拖垮整批 / 滑动窗口 / 任务池动态投递子任务 / 信号量 |
+| `parallel_test.dart` | 并行底座：并行度上限 / 按序启动 / 取消后不再启动 / 单个失败不拖垮整批 / 滑动窗口 / 任务池动态投递子任务 / 信号量 / 加权信号量（缓存预算） |
 | `parallel_pipeline_test.dart` | 并行端到端：WebDAV 6 文件扫描与修复 / 保存到本地保留子目录且同名不覆盖 / 本地 5 文件修复 / **客户端侧请求确实同时在途** / 取消不入列表 |
 | `webdav_test.dart` | WebDAV 端到端 13 项（中文/空格路径、Range 降级、认证、取消、分片 MP4 远程检测与修复、产物字节校验…） |
 | `webdav_util_test.dart` | URL 工具 + **服务端提前断开时识别"下载不完整"** |
@@ -121,7 +121,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（198 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
+flutter test                     # 全部测试（200 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -136,8 +136,15 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 198 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 200 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
+
+## 本版要点（v2.9.1 · 并行收尾）
+
+- **大文件自动收敛并行度**：按体积占用「缓存预算」（1GB 为单位，容量 = 并行度 × 2），
+  小文件仍跑满并行度，3~4GB 的大文件自动独占，避免 N 份完整缓存同时落盘；
+- **产物校验移到后台 Isolate**：覆盖前的结构 / 大小校验不再占用 UI 线程；
+- **WebDAV 认证只发给配置的根主机**：跨主机重定向或第三方 href 不再携带 Basic 凭据。
 
 ## 本版要点（v2.9.0 · 并行：不再一个文件一个文件地等）
 
