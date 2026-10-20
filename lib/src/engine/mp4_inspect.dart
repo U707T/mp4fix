@@ -38,6 +38,9 @@ class InspectReport {
     required this.faststart,
     this.interleaveMaxSeconds = 0,
     this.interleaveMeanSeconds = 0,
+    this.videoSeconds = 0,
+    this.audioSeconds = 0,
+    this.avTailGapSeconds = 0,
   });
 
   final Mp4Health health;
@@ -59,10 +62,26 @@ class InspectReport {
   ///
   /// 字节距离会随码率变化：低码率长视频即使音视频相隔几十秒，绝对字节数也可能
   /// 不到几 MB，只看字节就会漏判。时间错位与码率无关，用来兜住这类文件。
+  ///
+  /// **只统计两条轨道时间重叠的区间**（v2.9.3 起）：画面比音轨长出来的那段尾部
+  /// 本来就没有音频样本可比，把它算进来只会得到「错位 2.5 秒」这种假阳。
   final double interleaveMaxSeconds;
 
-  /// 同刻音视频在时间轴上的平均错位（秒）。
+  /// 同刻音视频在时间轴上的平均错位（秒），同样只统计重叠区间。
   final double interleaveMeanSeconds;
+
+  /// 画面轨时长（秒）；没有视频轨时为 0。
+  final double videoSeconds;
+
+  /// 音轨时长（秒）；没有音频轨时为 0。
+  final double audioSeconds;
+
+  /// 尾部时长差：画面结束时间 − 音轨结束时间（秒）。
+  ///
+  /// 正数 = 画面比音轨长（尾部若干秒没有音频，播放时静音）；
+  /// 负数 = 音轨比画面长（最后一帧定格）。这是**母带本身的时长差**，
+  /// 不是交错问题，重排也改不了，只作为说明信息，不参与「需重排」判定。
+  final double avTailGapSeconds;
 
   /// moov 是否已前置（faststart）。
   final bool faststart;
@@ -170,12 +189,18 @@ abstract final class Mp4Inspect {
     var meanDist = 0;
     var maxSec = 0.0;
     var meanSec = 0.0;
+    var videoSec = 0.0;
+    var audioSec = 0.0;
+    var tailGap = 0.0;
     if (video != null && audio != null) {
       final d = _interleaveDistance(video, audio);
       maxDist = d.max;
       meanDist = d.mean;
       maxSec = d.maxSec;
       meanSec = d.meanSec;
+      videoSec = _durationSeconds(video);
+      audioSec = _durationSeconds(audio);
+      tailGap = _endSeconds(video) - _endSeconds(audio);
     }
 
     final faststart = mdat == null || moov.start < mdat.start;
@@ -186,6 +211,8 @@ abstract final class Mp4Inspect {
       if (maxSec >= _noteSecondsFloor) {
         note.write('（时间错位最大 ${_formatSeconds(maxSec)}）');
       }
+      final gapNote = _tailGapNote(tailGap);
+      if (gapNote != null) note.write(gapNote);
     } else {
       note.write('单轨文件');
     }
@@ -227,12 +254,34 @@ abstract final class Mp4Inspect {
       interleaveMeanBytes: meanDist,
       interleaveMaxSeconds: maxSec,
       interleaveMeanSeconds: meanSec,
+      videoSeconds: videoSec,
+      audioSeconds: audioSec,
+      avTailGapSeconds: tailGap,
       faststart: faststart,
     );
   }
 
   /// 时间错位在说明文字里的显示下限（低于它就不提，避免正常文件刷屏）。
   static const double _noteSecondsFloor = 0.5;
+
+  /// 尾部时长差的说明下限（秒）。低于它多半是最后一帧 / AAC 尾包的零头，不提。
+  static const double _tailGapNoteFloor = 0.5;
+
+  /// 尾部时长差的说明文字（不参与判定，只解释「为什么音视频结尾对不齐」）。
+  ///
+  /// 画面比音轨长 N 秒 / 音轨比画面长 N 秒，都是母带本身的时长差：
+  /// 前者播放时末尾静音，后者最后一帧定格。重排只改数据摆放顺序，改不了时长，
+  /// 所以这类文件不该被判成「交错过错」——之前正是它把这两个文件卡在「需重排」。
+  static String? _tailGapNote(double tailGap) {
+    final gap = tailGap.abs();
+    if (gap < _tailGapNoteFloor) return null;
+    final videoLonger = tailGap > 0;
+    final longer = videoLonger ? '画面' : '音轨';
+    final shorter = videoLonger ? '音轨' : '画面';
+    final missing = videoLonger ? '音频' : '画面';
+    return '；$longer比$shorter长 ${_formatSeconds(gap)}'
+        ' —— 尾部无$missing，属母带时长差，不是交错问题，重排无法改变';
+  }
 
   /// 秒 → 人类可读（`1.5 秒` / `320 毫秒`）。
   static String _formatSeconds(double s) {
@@ -342,12 +391,18 @@ abstract final class Mp4Inspect {
     var meanDist = 0;
     var maxSec = 0.0;
     var meanSec = 0.0;
+    var videoSec = 0.0;
+    var audioSec = 0.0;
+    var tailGap = 0.0;
     if (video != null && audio != null) {
       final d = _interleaveDistance(video, audio);
       maxDist = d.max;
       meanDist = d.mean;
       maxSec = d.maxSec;
       meanSec = d.meanSec;
+      videoSec = _durationSeconds(video);
+      audioSec = _durationSeconds(audio);
+      tailGap = _endSeconds(video) - _endSeconds(audio);
     }
 
     final faststart = moov.start < moofs.first.start;
@@ -360,6 +415,8 @@ abstract final class Mp4Inspect {
       if (maxSec >= _noteSecondsFloor) {
         note.write('（时间错位最大 ${_formatSeconds(maxSec)}）');
       }
+      final gapNote = _tailGapNote(tailGap);
+      if (gapNote != null) note.write(gapNote);
     } else {
       note.write(' · 单轨文件');
     }
@@ -397,6 +454,9 @@ abstract final class Mp4Inspect {
       interleaveMeanBytes: meanDist,
       interleaveMaxSeconds: maxSec,
       interleaveMeanSeconds: meanSec,
+      videoSeconds: videoSec,
+      audioSeconds: audioSec,
+      avTailGapSeconds: tailGap,
       faststart: faststart,
     );
   }
@@ -421,6 +481,10 @@ abstract final class Mp4Inspect {
   ///
   /// 字节距离反映播放器要跳读多远（受码率影响）；时间错位反映音视频在时间轴上
   /// 差了多少（与码率无关）。两者一起用，才能同时兜住高码率与低码率文件。
+  ///
+  /// **只统计两条轨道时间重叠的区间**。画面比音轨长出来的尾部（或反过来）本来就
+  /// 没有对端样本可比 —— 硬拿「最近的音频样本」去配，差值会一路涨到两条轨道的
+  /// 时长差。那个差值不代表文件摆放有问题，重排也消不掉（v2.9.3 修复）。
   static ({int max, int mean, double maxSec, double meanSec})
       _interleaveDistance(
     _TrackInfo video,
@@ -433,6 +497,15 @@ abstract final class Mp4Inspect {
     final vn = vDts.length;
     final an = aDts.length;
     final step = vn > _maxSampledVideoSamples ? vn ~/ _maxSampledVideoSamples : 1;
+
+    // 重叠窗口：两边都"有内容"的时间范围。
+    final winStart = _startSeconds(video) > _startSeconds(audio)
+        ? _startSeconds(video)
+        : _startSeconds(audio);
+    var winEnd = _endSeconds(video) < _endSeconds(audio)
+        ? _endSeconds(video)
+        : _endSeconds(audio);
+    if (winEnd < winStart) winEnd = winStart;
 
     // 音频样本按时间有序（stts 即时间序），构造时间数组用于二分查找
     final aTimes = Float64List(an);
@@ -448,17 +521,21 @@ abstract final class Mp4Inspect {
     var vi = 0;
     while (vi < vn) {
       final t = vDts[vi] / video.timescale;
+      final off = vOff[vi];
+      vi += step;
+      // 重叠窗口之外：这一端没有对端样本，不参与距离统计
+      if (t < winStart || t > winEnd) continue;
       final j = _lowerBound(aTimes, t);
       var best = -1;
       var bestSec = -1.0;
       var k = j - 1;
       if (k >= 0 && k < an) {
-        best = (vOff[vi] - aOff[k]).abs();
+        best = (off - aOff[k]).abs();
         bestSec = (t - aTimes[k]).abs();
       }
       k = j;
       if (k >= 0 && k < an) {
-        final d = (vOff[vi] - aOff[k]).abs();
+        final d = (off - aOff[k]).abs();
         if (best < 0 || d < best) {
           best = d;
           bestSec = (t - aTimes[k]).abs();
@@ -471,7 +548,6 @@ abstract final class Mp4Inspect {
         sumSec += bestSec;
         count++;
       }
-      vi += step;
     }
     final mean = count == 0 ? 0 : (sum / count).toInt();
     return (
@@ -480,6 +556,31 @@ abstract final class Mp4Inspect {
       maxSec: maxSec,
       meanSec: count == 0 ? 0.0 : sumSec / count,
     );
+  }
+
+  /// 轨道起始时间（秒）。常规 MP4 的 dts 从 0 起；分片文件可能带偏移。
+  static double _startSeconds(_TrackInfo t) {
+    final d = t.dts;
+    if (d == null || d.isEmpty) return 0;
+    return d.first / t.timescale;
+  }
+
+  /// 轨道结束时间（秒）= 起始 + mdhd 时长（缺失时用最后一个样本间隔推算）。
+  static double _endSeconds(_TrackInfo t) {
+    final d = t.dts;
+    if (d == null || d.isEmpty) return 0;
+    final start = _startSeconds(t);
+    if (t.durationSeconds > 0) return start + t.durationSeconds;
+    final last = d.last / t.timescale;
+    final prev = d.length > 1 ? d[d.length - 2] / t.timescale : last;
+    return last + (last - prev);
+  }
+
+  /// 轨道时长（秒）。
+  static double _durationSeconds(_TrackInfo t) {
+    final end = _endSeconds(t);
+    final start = _startSeconds(t);
+    return end > start ? end - start : 0.0;
   }
 
   static int _lowerBound(Float64List a, double v) {
@@ -671,6 +772,7 @@ abstract final class Mp4Inspect {
     t.samples = n;
     t.dts = dts;
     t.offsets = srcOff;
+    t.durationSeconds = acc / t.timescale;
   }
 
   /// ctts 结构硬检查：盒长与条目数自洽性（检测"corrupted CTTS"一类问题的前半段）。
@@ -764,4 +866,10 @@ class _TrackInfo {
   int samples = 0;
   List<int>? dts;
   List<int>? offsets;
+
+  /// 轨道媒体时长（秒，由 stts 累计 / timescale 得到）。
+  ///
+  /// 交错距离要判断「两条轨道在时间轴上重叠到哪」，没有它就分不清
+  /// 「尾部没有音频」和「音频被摆到很远的地方」。
+  double durationSeconds = 0;
 }

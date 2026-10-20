@@ -74,6 +74,40 @@ void main() {
     });
   });
 
+  group('尾部时长差 ≠ 交错不良（v2.9.3）', () {
+    // 夹具 av_tail_gap.mp4：视频 3.00s / 音频 2.02s，交错本身很紧凑（最大 153 B），
+    // 只是画面比音轨长 0.98 秒。旧算法把「没有音频可配」的尾部算成时间错位
+    // （实测 880ms）→ 判「需重排」；而重排对这类文件逐字节无效（两个真实文件
+    // 修复前后 md5 完全相同），用户看到的就是「永远修不好」。
+    test('尾部没有对端样本的区间不参与时间错位统计', () {
+      final r = inspect('av_tail_gap.mp4', bytes: 1 << 40, seconds: 0.3);
+      expect(r.health, Mp4Health.ok, reason: r.detail);
+      expect(r.interleaveMaxBytes, lessThan(20000));
+      expect(r.interleaveMaxSeconds, lessThan(0.1),
+          reason: 'maxSec=${r.interleaveMaxSeconds}');
+      expect(r.videoSeconds, closeTo(3.00, 0.05));
+      expect(r.audioSeconds, closeTo(2.02, 0.05));
+      expect(r.avTailGapSeconds, closeTo(0.98, 0.05));
+      expect(r.detail, contains('画面比音轨长'));
+      expect(r.detail, contains('重排无法改变'));
+    });
+
+    test('音轨更长时同样只作说明，方向不能反', () {
+      final r = inspect('av_tail_gap_audio.mp4', bytes: 1 << 40, seconds: 0.3);
+      expect(r.health, Mp4Health.ok, reason: r.detail);
+      expect(r.interleaveMaxSeconds, lessThan(0.1));
+      expect(r.avTailGapSeconds, closeTo(-1.02, 0.05));
+      expect(r.detail, contains('音轨比画面长'));
+    });
+
+    test('尾部差小于 0.5 秒不写进说明（避免正常文件刷屏）', () {
+      final r = inspect('good.mp4');
+      expect(r.avTailGapSeconds.abs(), lessThan(0.5));
+      expect(r.detail, isNot(contains('比音轨长')));
+      expect(r.detail, isNot(contains('比画面长')));
+    });
+  });
+
   group('设置项持久化', () {
     test('thresholdSeconds 能存能读，缺字段回落到默认值', () {
       final s = AppSettings(thresholdSeconds: 0.5);

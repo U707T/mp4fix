@@ -25,10 +25,18 @@ void main() {
     }
   }
 
-  InspectReport inspectFile(File f) {
+  InspectReport inspectFile(
+    File f, {
+    int bytes = Mp4Inspect.defaultInterleaveThreshold,
+    double seconds = Mp4Inspect.defaultInterleaveThresholdSeconds,
+  }) {
     final input = FileSeekableInput(f);
     try {
-      return Mp4Inspect.inspect(input);
+      return Mp4Inspect.inspect(
+        input,
+        interleaveThresholdBytes: bytes,
+        interleaveThresholdSeconds: seconds,
+      );
     } finally {
       input.close();
     }
@@ -89,6 +97,28 @@ void main() {
         () => repairToFile('good.mp4', out, isCancelled: () => true),
         throwsA(isA<RepairCancelledException>()),
       );
+    } finally {
+      if (out.existsSync()) out.deleteSync();
+    }
+  });
+
+  /// 回归（v2.9.3）：尾部时长差不是交错问题。
+  ///
+  /// 修复必须**原样保留**时长差（不能偷偷裁掉多出的画面），产物检测也不能再报
+  /// 「需重排」—— 否则这类文件会陷入「修完还是需重排 → 再修 → 再报」的死循环
+  /// （真实样本的两个文件修复前后 md5 完全相同）。
+  test('tailGapFileRepairsWithoutLosingContent', () {
+    final out = tempOut('mp4fix-tailgap');
+    try {
+      repairToFile('av_tail_gap.mp4', out);
+      final r = inspectFile(out, bytes: 20000, seconds: 0.3);
+      expect(r.health, Mp4Health.ok, reason: r.detail);
+      expect(r.interleaveMaxSeconds, lessThan(0.1),
+          reason: 'maxSec=${r.interleaveMaxSeconds}');
+      expect(r.videoSamples, 30);
+      expect(r.audioSamples, 88);
+      expect(r.avTailGapSeconds, closeTo(0.98, 0.05),
+          reason: '修复不能改变母带的尾部时长差');
     } finally {
       if (out.existsSync()) out.deleteSync();
     }

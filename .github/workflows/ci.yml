@@ -31,7 +31,7 @@ jobs:
         run: flutter pub get
       - name: Analyze
         run: dart analyze
-      - name: Test (engine + WebDAV end-to-end + 分片 MP4 + 记录 / 命名规则 / 白屏回归 / 双阈值 / 覆盖安全 / 残留恢复 + 并行流水线, 203 项)
+      - name: Test (engine + WebDAV end-to-end + 分片 MP4 + 记录 / 命名规则 / 白屏回归 / 双阈值 / 尾部时长差 / 覆盖安全 / 残留恢复 + 并行流水线, 207 项)
         run: flutter test
 
   # ---------------------------------------------------------------- Android

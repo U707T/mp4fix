@@ -37,6 +37,9 @@ Windows 端支持**把视频 / 文件夹直接拖进窗口**（也可以把文�
 
 检测结果：**正常 / 需重排 / 可优化（缺 moov 前置 / 分片 MP4）/ 损坏 / 已修复（复用上次结果）**，阈值可调
 （几十~几百 MB 的交错距离才是卡顿元凶；分片 MP4 会按同一套规则判定，修复时无损转换为标准 MP4）。
+「时间错位」只统计**音视频时间重叠**的区间：画面比音轨长 / 音轨比画面长这类尾部时长差
+只写进说明（例：`画面比音轨长 2.5 秒（尾部无音频，属母带时长差，重排无法改变）`），不判「需重排」
+—— 重排改的是数据摆放顺序，改不了「这段音频本来就不存在」。
 
 ## 修复原理（不重新编码、画质无损）
 
@@ -86,11 +89,12 @@ tool/dav_dev_server.dart 本地开发用迷你 WebDAV 服务器
   状态机 / 进度 / 取消 / 修复记录仍留在原来的调用方。每个文件依然先写独立缓存产物、
   校验通过才落位；「停止」会杀掉所有在跑的修复 Isolate。
 
-## 测试（203 项，`flutter test`）
+## 测试（207 项，`flutter test`）
 
 | 测试文件 | 覆盖 |
 |---|---|
 | `mp4_inspect_test.dart` | 检测器：正常 / 交错不良 / v1 mdhd / 截断 / 阈值行为 |
+| `dual_threshold_test.dart` | 判定口径：字节 / 时间双阈值；**尾部时长差不参与错位统计**（画面或音轨先结束） |
 | `mp4_repair_test.dart` | 修复：样本数保持 / v1 mdhd 真正重排 / 截断报错 / 取消 |
 | `kotlin_parity_test.dart` | **与 Kotlin 旧引擎逐字节对齐**（金标准） |
 | `lossless_test.dart` | **无损不变量**：独立实现的解析器逐样本比对 大小 / 时间戳 / 描述 / **载荷字节** |
@@ -121,7 +125,7 @@ export PATH=/opt/flutter/bin:$PATH
 
 flutter pub get
 dart analyze                     # 静态检查
-flutter test                     # 全部测试（203 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
+flutter test                     # 全部测试（207 项：引擎 / 无损 / 金标准 / 分片 / WebDAV / 界面回归 …）
 
 # 命令行（PC）
 dart run bin/mp4fix_cli.dart --inspect 文件.mp4
@@ -136,7 +140,7 @@ dart run tool/dav_dev_server.dart /tmp/videos 8080
 ### 发布流程
 
 1. 改 `pubspec.yaml` 的 `version: X.Y.Z+N`；
-2. push 到 `main` → CI 自动：`test`（analyze + 203 项测试）→ `build-android`（debug + 3 个 release APK）→
+2. push 到 `main` → CI 自动：`test`（analyze + 207 项测试）→ `build-android`（debug + 3 个 release APK）→
    若 `vX.Y.Z` 尚无 tag，则**自动创建 Release 并上传 4 个 APK**（版本号带 `-rc` 后缀会标记为 prerelease）。
 
 ## 本版要点（v2.9.2 · WebDAV 保存到本地修复）
