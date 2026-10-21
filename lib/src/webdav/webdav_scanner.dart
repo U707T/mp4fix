@@ -14,6 +14,7 @@ class ScanItem {
     required this.size,
     this.report,
     this.error,
+    this.isDirectoryError = false,
   });
 
   final String url;
@@ -24,6 +25,9 @@ class ScanItem {
   final int size;
   final InspectReport? report;
   final String? error;
+
+  /// 这是「目录列举失败」而不是一个视频文件：界面只提示，不建任务行。
+  final bool isDirectoryError;
 
   bool get needsFix => report?.health == Mp4Health.needsReinterleave;
 
@@ -91,6 +95,13 @@ class WebDavScanner {
   /// Range 支持探测结果（首个文件时确定一次）。
   bool? _rangeSupport;
 
+  /// 扫描撞到目录 / 文件上限时给出的说明（null = 结果完整）。
+  ///
+  /// 以前是**静默** return：用户看到的只是「扫描完成：N 个视频」，
+  /// 完全不知道后面还有一大半目录根本没列。与本地 / SAF 扫描的
+  /// 「撞上限必须明确提示」保持一致。
+  String? truncationNotice;
+
   /// 降级下载的临时文件序号。
   ///
   /// 并行扫描时会有多个文件同时走「整档下载」回退；只按时间戳命名在
@@ -141,7 +152,10 @@ class WebDavScanner {
     Future<void> walk(String dirUrl, String relPath) async {
       if (cancelled()) return;
       if (!visited.add(dirUrl)) return;
-      if (visited.length > maxDirs) return;
+      if (visited.length > maxDirs) {
+        truncationNotice ??= '目录数超过上限（$maxDirs），结果不完整';
+        return;
+      }
 
       final List<DavEntry> entries;
       try {
@@ -155,6 +169,7 @@ class WebDavScanner {
           name: name,
           size: -1,
           error: '读取目录失败：${errorMessage(e)}',
+          isDirectoryError: true,
         ));
         return;
       }
@@ -179,6 +194,7 @@ class WebDavScanner {
         if (!videoExtensions.contains(ext)) continue;
         fileCount++;
         if (fileCount > maxFiles) {
+          truncationNotice ??= '视频数超过上限（$maxFiles），结果不完整';
           stopped = true;
           return;
         }

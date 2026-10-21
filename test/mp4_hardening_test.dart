@@ -78,4 +78,14 @@ void main() {
       input.close();
     }
   });
+
+  test('mdat 头部长度必须跟随布局：co64 布局固定 16 字节大头部', () {
+    expect(Mp4Repair.mdatHeaderLength(useCo64: false), 8);
+    expect(
+      Mp4Repair.mdatHeaderLength(useCo64: true),
+      16,
+      reason: 'co64 布局的偏移基准按 16 字节头部计算；'
+          'payload 本身不足 4 GiB 时也不能退回 8 字节，否则所有样本偏移早 8 字节',
+    );
+  });
 }

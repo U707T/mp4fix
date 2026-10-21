@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'binary.dart';
 import 'boxes.dart';
 import 'mp4_fragments.dart';
+import 'sample_tables.dart';
 import 'seekable_input.dart';
 
 /// MP4 健康状态。
@@ -696,15 +697,15 @@ abstract final class Mp4Inspect {
       final raw = readBytes(input, b.start, b.size);
       switch (b.type) {
         case 'stsc':
-          stsc = _parseStsc(raw);
+          stsc = parseStsc(raw);
         case 'stco':
-          offsets = _parseStco(raw, is64: false);
+          offsets = parseStco(raw, is64: false);
         case 'co64':
-          offsets = _parseStco(raw, is64: true);
+          offsets = parseStco(raw, is64: true);
         case 'stsz':
-          sizes = _parseStsz(raw);
+          sizes = parseStsz(raw);
         case 'stts':
-          final e = _parseStts(raw);
+          final e = parseStts(raw);
           sttsCounts = e.counts;
           sttsDeltas = e.deltas;
         case 'ctts':
@@ -753,7 +754,12 @@ abstract final class Mp4Inspect {
       final spc = stscE[e][1];
       var o = offs[ci];
       for (var k = 0; k < spc; k++) {
-        if (s >= n) throw RepairException('stsc/stco 与实际样本数不一致');
+        if (s >= n) {
+          // 末块声明多于实际样本：流式录制 / 被截断的文件很常见，
+          // 多出来的样本号没有数据可指 —— 截断即可，不必判整份文件损坏。
+          if (ci == offs.length - 1) break;
+          throw RepairException('stsc/stco 与实际样本数不一致');
+        }
         srcOff[s] = o;
         o += sz[s];
         s++;
@@ -786,71 +792,6 @@ abstract final class Mp4Inspect {
   }
 
   // ---------------------------------------------------------------- 表解析
-
-  static List<List<int>> _parseStsc(Uint8List raw) {
-    if (raw.length < 16) throw RepairException('stsc 盒过小（疑似损坏）');
-    final cnt = u32AsInt(raw, 12);
-    if (cnt <= 0) throw RepairException('stsc 表为空');
-    checkTableFits(raw, cnt, 12, 16, 'stsc');
-    final out = List<List<int>>.generate(cnt, (_) => List<int>.filled(3, 0));
-    var p = 16;
-    for (var i = 0; i < cnt; i++) {
-      out[i][0] = u32(raw, p);
-      out[i][1] = u32(raw, p + 4);
-      out[i][2] = u32(raw, p + 8);
-      p += 12;
-    }
-    for (var i = 1; i < cnt; i++) {
-      if (out[i][0] <= out[i - 1][0]) throw RepairException('stsc 表异常');
-    }
-    return out;
-  }
-
-  static List<int> _parseStco(Uint8List raw, {required bool is64}) {
-    if (raw.length < 16) throw RepairException('stco 盒过小（疑似损坏）');
-    final cnt = u32AsInt(raw, 12);
-    checkTableFits(raw, cnt, is64 ? 8 : 4, 16, is64 ? 'co64' : 'stco');
-    final out = List<int>.filled(cnt, 0);
-    var p = 16;
-    for (var i = 0; i < cnt; i++) {
-      out[i] = is64 ? u64(raw, p) : u32(raw, p);
-      p += is64 ? 8 : 4;
-    }
-    return out;
-  }
-
-  static List<int> _parseStsz(Uint8List raw) {
-    if (raw.length < 20) throw RepairException('stsz 盒过小（疑似损坏）');
-    final uniform = u32(raw, 12);
-    final cnt = u32AsInt(raw, 16);
-    if (uniform == 0) checkTableFits(raw, cnt, 4, 20, 'stsz');
-    final out = List<int>.filled(cnt, 0);
-    if (uniform != 0) {
-      out.fillRange(0, cnt, uniform);
-    } else {
-      var p = 20;
-      for (var i = 0; i < cnt; i++) {
-        out[i] = u32(raw, p);
-        p += 4;
-      }
-    }
-    return out;
-  }
-
-  static ({List<int> counts, List<int> deltas}) _parseStts(Uint8List raw) {
-    if (raw.length < 16) throw RepairException('stts 盒过小（疑似损坏）');
-    final cnt = u32AsInt(raw, 12);
-    checkTableFits(raw, cnt, 8, 16, 'stts');
-    final counts = List<int>.filled(cnt, 0);
-    final deltas = List<int>.filled(cnt, 0);
-    var p = 16;
-    for (var i = 0; i < cnt; i++) {
-      counts[i] = u32(raw, p);
-      deltas[i] = u32(raw, p + 4);
-      p += 8;
-    }
-    return (counts: counts, deltas: deltas);
-  }
 }
 
 class _TrackInfo {

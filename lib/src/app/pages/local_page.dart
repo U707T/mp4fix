@@ -41,6 +41,8 @@ class _LocalPageState extends State<LocalPage> {
         .toList(growable: false);
     final busy = controller.runningSource == JobSource.local;
     final canRun = !controller.running;
+    // 一次算完：下面按钮的计数与显示条件共用。
+    final fixable = controller.fixableCount(JobSource.local);
 
     return Scaffold(
       appBar: AppBar(
@@ -128,8 +130,9 @@ class _LocalPageState extends State<LocalPage> {
             jobs: all,
             active: busy ? controller.batchDone : null,
             total: busy ? controller.batchTotal : null,
-            fixableCount: controller.fixableCount(JobSource.local),
-            onFixAll: canRun && controller.hasFixable(JobSource.local)
+            fixableCount: fixable,
+            onFixAll:
+                canRun && fixable > 0
                 ? () => guardUi(
                     context,
                     () => controller.fixJobs(JobSource.local),

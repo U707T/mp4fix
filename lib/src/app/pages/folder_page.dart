@@ -63,7 +63,7 @@ class _FolderPageState extends State<FolderPage> {
         itemCount: jobs.isEmpty ? 1 : jobs.length + 1,
         itemBuilder: (context, index) {
           if (index > 0) return JobTile(job: jobs[index - 1]);
-          return _buildHeader(context, controller, all, busy, canRun);
+          return _buildHeader(context, controller, all, jobs, busy, canRun);
         },
       ),
     );
@@ -73,12 +73,14 @@ class _FolderPageState extends State<FolderPage> {
     BuildContext context,
     AppController controller,
     List<FixJob> all,
+    /// 已经按当前筛选过滤好的列表（外层 build 算过一次，别在这里重算）。
+    List<FixJob> visible,
     bool busy,
     bool canRun,
   ) {
-    final jobs = all
-        .where((j) => _filter.matches(j.status))
-        .toList(growable: false);
+    // 一次算完，下面两处（按钮计数 / 是否显示按钮）都用它：
+    // 以前 fixableCount 与 hasFixable 各扫一遍全表。
+    final fixable = controller.fixableCount(JobSource.folder);
     return Column(
       children: [
         SectionCard(
@@ -233,8 +235,8 @@ class _FolderPageState extends State<FolderPage> {
           jobs: all,
           active: busy ? controller.batchDone : null,
           total: busy ? controller.batchTotal : null,
-          fixableCount: controller.fixableCount(JobSource.folder),
-          onFixAll: canRun && controller.hasFixable(JobSource.folder)
+          fixableCount: fixable,
+          onFixAll: canRun && fixable > 0
               ? () =>
                     guardUi(context, () => controller.fixJobs(JobSource.folder))
               : null,
@@ -267,7 +269,7 @@ class _FolderPageState extends State<FolderPage> {
                   '「扫描并修复」会把需重排的文件无损重排后写入输出位置。',
             ),
           )
-        else if (jobs.isEmpty)
+        else if (visible.isEmpty)
           const Padding(
             padding: EdgeInsets.only(top: 32),
             child: EmptyHint(

@@ -22,7 +22,13 @@ Future<void> main(List<String> args) async {
       };
 
       final controller = AppController();
-      await controller.init();
+      // `init()` 内部已经逐步兜底；这里再加一层，保证任何意外都不会让
+      // `runApp` 被跳过 —— 那样用户看到的是永久黑屏，连设置页都进不去。
+      try {
+        await controller.init();
+      } catch (e) {
+        debugPrint('[mp4fix] init failed: $e');
+      }
       runApp(Mp4FixApp(controller: controller));
 
       // 「用 MP4Fix 打开」/ 把文件拖到 exe 图标上：命令行参数直接导入检测

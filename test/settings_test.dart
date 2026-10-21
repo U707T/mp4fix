@@ -147,4 +147,15 @@ void main() {
     expect(s.webDavPassword, isEmpty);
     expect(s.parallelism, 0, reason: '0 = 自动（按核数 / 内存决定）');
   });
+
+  test('读设置时收敛坏值：并行度 / 阈值不会被手改的 JSON 带飞', () {
+    final s = AppSettings.fromJson(const {
+      'parallelism': 100,
+      'thresholdMb': -5,
+      'thresholdSeconds': 999,
+    });
+    expect(s.parallelism, 4, reason: 'UI 上限 4，超出的值按 4 处理');
+    expect(s.thresholdMb, 0);
+    expect(s.thresholdSeconds, 60.0);
+  });
 }

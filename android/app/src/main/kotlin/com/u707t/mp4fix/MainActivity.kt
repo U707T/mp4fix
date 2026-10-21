@@ -316,6 +316,15 @@ class MainActivity : FlutterActivity() {
             } catch (e: Exception) {
                 val message = e.message ?: e.javaClass.simpleName
                 mainHandler.post { result.error("platform_error", message, null) }
+            } catch (t: Throwable) {
+                // Error（例如大文件并发时的 OutOfMemoryError）不是 Exception。
+                // 以前这里会漏掉：后台线程直接死掉，MethodChannel 的 Result 永远
+                // 不回调 —— Dart 侧就在「检测中 / 修复中」永久挂住，running 一直
+                // 为 true，所有按钮全灰，只能杀进程。任何 Throwable 都必须回一个
+                // 明确结果。
+                val message = "平台内部错误：" +
+                    (t.message ?: t.javaClass.simpleName)
+                mainHandler.post { result.error("platform_error", message, null) }
             }
         }.start()
     }
@@ -403,11 +412,26 @@ class MainActivity : FlutterActivity() {
 
         // ---- 3) 原文件让位（改名 .bak；改名失败就保留原名，绝不删除）----
         var backupUri: Uri? = null
+        // 被让位的旧 .bak（改名成 .old 保留，成功后再清）
+        var parkedBak: Uri? = null
         val existing = findChild(tree, parent, name)
         if (existing != null) {
-            // 清掉上一次残留的 .bak（它已被本次的 .bak 取代）
-            findChild(tree, parent, backupName)?.let {
-                runCatching { DocumentsContract.deleteDocument(resolver, it) }
+            // 旧的 .bak 可能是上次崩溃后用户唯一的数据副本：**先改名让位，不要删**。
+            // 等新备份确认建立、落位确认成功后，这个 .old 才允许清理。
+            val staleBak = findChild(tree, parent, backupName)
+            if (staleBak != null) {
+                val parkName = "$backupName.old"
+                findChild(tree, parent, parkName)?.let {
+                    runCatching { DocumentsContract.deleteDocument(resolver, it) }
+                }
+                parkedBak = runCatching {
+                    DocumentsContract.renameDocument(resolver, staleBak, parkName)
+                }.getOrNull() ?: staleBak
+                if (findChild(tree, parent, backupName) != null) {
+                    // 让位没生效：不能继续（会和旧 .bak 撞名），直接中止
+                    runCatching { DocumentsContract.deleteDocument(resolver, partUri) }
+                    throw IOException("临时备份无法让位（$backupName），已中止，原文件未改动")
+                }
             }
             val renamed = runCatching {
                 DocumentsContract.renameDocument(resolver, existing, backupName)
@@ -477,6 +501,8 @@ class MainActivity : FlutterActivity() {
         }
 
         backupUri?.let { runCatching { DocumentsContract.deleteDocument(resolver, it) } }
+        // 正式文件已确认，被让位的旧 .bak 才可以清掉
+        parkedBak?.let { runCatching { DocumentsContract.deleteDocument(resolver, it) } }
         return confirmed
     }
 
@@ -723,22 +749,59 @@ class MainActivity : FlutterActivity() {
         if (Build.VERSION.SDK_INT >= 29) {
             val existing = findDownload(name, relativeDir)
             if (existing != null) {
+                // ★ 覆盖同名产物：**绝不就地截断旧文件**。
+                //   先完整写一份新的 pending 条目 → 校验大小 → 改成正式名，
+                //   最后才删旧文件。中途任何失败（磁盘满 / 提供方断开 / 取消）
+                //   都只删临时文件，用户已经修好的旧产物毫发无伤。
+                //   以前是 openOutputStream(existing, "wt") 原地覆盖，失败后还
+                //   直接把旧文件删了再新建 —— 正好留下「旧的没了、新的没写成」。
+                val tmpName = "$name.mp4fix-part"
+                findDownload(tmpName, relativeDir)?.let {
+                    runCatching { resolver.delete(it, null, null) }
+                }
+                val tmpUri = resolver.insert(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, tmpName)
+                        put(MediaStore.MediaColumns.MIME_TYPE, mimeTypeOf(name))
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, relDir)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    },
+                ) ?: throw IOException("无法在下载目录创建临时文件")
                 try {
-                    resolver.openOutputStream(existing, "wt")?.use { out ->
+                    resolver.openOutputStream(tmpUri, "w")?.use { out ->
                         source.inputStream().use { input -> copyCancellable(input, out, epoch) }
                     } ?: throw IOException("无法写入下载目录")
-                    return "$relDir$name"
-                } catch (e: WriteCancelledException) {
-                    // 取消：直接冒泡（不要当成「覆盖失败」删掉旧文件再重试一遍）
-                    throw e
-                } catch (e: Exception) {
-                    // 覆盖失败：删掉旧文件后走下面的新建流程
+                    val written = source.length()
+                    val copied = documentSize(tmpUri)
+                    if (written > 0 && copied >= 0 && copied != written) {
+                        throw IOException("落盘校验失败（$copied ≠ $written 字节），原文件未改动")
+                    }
+                    val moved = runCatching {
+                        resolver.update(
+                            tmpUri,
+                            ContentValues().apply {
+                                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                                put(MediaStore.MediaColumns.IS_PENDING, 0)
+                            },
+                            null,
+                            null,
+                        )
+                    }.isSuccess
+                    if (!moved || displayNameOf(tmpUri) != name) {
+                        throw IOException("无法把新文件改名为 $name，原文件未改动")
+                    }
+                    // 新文件已就位，才删旧文件；删不掉只会多一份同名副本，不丢数据
                     runCatching { resolver.delete(existing, null, null) }
+                    return "$relDir$name"
+                } catch (e: Exception) {
+                    runCatching { resolver.delete(tmpUri, null, null) }
+                    throw e
                 }
             }
             val values = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeTypeOf(name))
                 put(MediaStore.MediaColumns.RELATIVE_PATH, relDir)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
@@ -748,6 +811,11 @@ class MainActivity : FlutterActivity() {
                 resolver.openOutputStream(uri, "w")?.use { out ->
                     source.inputStream().use { input -> copyCancellable(input, out, epoch) }
                 } ?: throw IOException("无法写入下载目录")
+                val written = source.length()
+                val copied = documentSize(uri)
+                if (written > 0 && copied >= 0 && copied != written) {
+                    throw IOException("落盘校验失败（$copied ≠ $written 字节）")
+                }
             } catch (e: Exception) {
                 runCatching { resolver.delete(uri, null, null) }
                 throw e
@@ -788,6 +856,26 @@ class MainActivity : FlutterActivity() {
             ?.joinToString("/")
             ?: ""
         return if (sub.isEmpty()) "$base/" else "$base/$sub/"
+    }
+
+    /** 产物扩展名 → MIME。写死 video/mp4 会让 .mov 被系统当成 mp4 分类。 */
+    private fun mimeTypeOf(name: String): String = when (
+        name.substringAfterLast('.', "").lowercase()
+    ) {
+        "mp4", "m4v" -> "video/mp4"
+        "mov" -> "video/quicktime"
+        else -> "application/octet-stream"
+    }
+
+    /** 查询某个 MediaStore 条目当前的 DISPLAY_NAME（改名是否生效以此为准）。 */
+    private fun displayNameOf(uri: Uri): String? = try {
+        contentResolver.query(
+            uri,
+            arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+            null, null, null,
+        )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+    } catch (_: Exception) {
+        null
     }
 
     /** 把 RELATIVE_PATH 归一化后比较（有的提供方会带尾斜杠 / 反斜杠）。 */

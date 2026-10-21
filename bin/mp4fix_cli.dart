@@ -24,7 +24,11 @@ Future<void> main(List<String> args) async {
     case '-i':
       final path = opts.positional.isEmpty ? null : opts.positional.first;
       if (path == null) _usage();
-      _inspect(File(path!), thresholdSeconds: opts.thresholdSeconds);
+      _inspect(
+        File(path!),
+        thresholdBytes: opts.thresholdBytes,
+        thresholdSeconds: opts.thresholdSeconds,
+      );
       return;
     case '--dav-scan':
       // 不带 URL 时用出厂默认服务器（AppDefaults）
@@ -133,7 +137,11 @@ String _healthText(Mp4Health h) => switch (h) {
 
 // ---------------------------------------------------------------- 本地
 
-void _inspect(File file, {double? thresholdSeconds}) {
+void _inspect(
+  File file, {
+  int? thresholdBytes,
+  double? thresholdSeconds,
+}) {
   if (!file.existsSync()) {
     stderr.writeln('文件不存在: ${file.path}');
     exit(2);
@@ -142,6 +150,10 @@ void _inspect(File file, {double? thresholdSeconds}) {
   try {
     final r = Mp4Inspect.inspect(
       input,
+      // 以前只传了秒阈值：`--threshold` 在 inspect 下被静默忽略，
+      // 用 CLI 检测和 GUI 判定会得出不同结论。
+      interleaveThresholdBytes:
+          thresholdBytes ?? Mp4Inspect.defaultInterleaveThreshold,
       interleaveThresholdSeconds: thresholdSeconds ??
           Mp4Inspect.defaultInterleaveThresholdSeconds,
     );
@@ -160,6 +172,12 @@ void _repair(File inFile, File outFile) {
   if (!inFile.existsSync()) {
     stderr.writeln('输入文件不存在: ${inFile.path}');
     exit(3);
+  }
+  // 输入输出是同一个文件时直接拒绝：FileMode.write 会先把文件截断，
+  // 引擎再去读就已经是 0 字节了 —— 用户的原片当场没了。
+  if (inFile.absolute.path == outFile.absolute.path) {
+    stderr.writeln('输入与输出不能是同一个文件（原文件会被截断）');
+    exit(7);
   }
   final input = FileSeekableInput(inFile);
   final sink = FileSyncSink(outFile.openSync(mode: FileMode.write));
@@ -206,6 +224,10 @@ Future<int> _davScan(String url, _Options opts) async {
       url,
       tempDir: cacheDir,
       onFile: (item) {
+        if (item.isDirectoryError) {
+          stdout.writeln('  [目录错误] ${item.path} — ${item.error}');
+          return;
+        }
         final status = item.report != null
             ? _healthText(item.report!.health)
             : '读取失败';
@@ -213,8 +235,9 @@ Future<int> _davScan(String url, _Options opts) async {
             '${item.error != null ? ' — ${item.error}' : ''}');
       },
     );
-    final need = items.where((i) => i.needsFix).length;
-    stdout.writeln('完成: 共 ${items.length} 个视频，需重排 $need 个');
+    final videos = items.where((i) => !i.isDirectoryError).toList();
+    final need = videos.where((i) => i.needsFix).length;
+    stdout.writeln('完成: 共 ${videos.length} 个视频，需重排 $need 个');
     return 0;
   } catch (e) {
     stderr.writeln('失败: $e');
@@ -236,13 +259,14 @@ Future<int> _davFix(String url, _Options opts) async {
         );
     stdout.writeln('扫描中: $url …');
     final items = await scanner.scan(url, tempDir: cacheDir);
-    final todo = items
+    final videos = items.where((i) => !i.isDirectoryError).toList();
+    final todo = videos
         .where((i) =>
             i.needsFix ||
             (opts.includeOptimizable &&
                 i.report?.health == Mp4Health.optimizable))
         .toList();
-    stdout.writeln('共 ${items.length} 个视频，待处理 ${todo.length} 个');
+    stdout.writeln('共 ${videos.length} 个视频，待处理 ${todo.length} 个');
 
     final fixer = WebDavFixer(client, cacheDir: cacheDir);
     var ok = 0;

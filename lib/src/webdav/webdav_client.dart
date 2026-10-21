@@ -91,6 +91,15 @@ class WebDavClient {
 
   static const String _userAgent = 'MP4Fix-WebDAV/2.0 (Flutter)';
 
+  /// 删除失败不抛出：调用方已经在错误路径上，清理只是尽力而为。
+  static void _quietDelete(File f) {
+    try {
+      if (f.existsSync()) f.deleteSync();
+    } catch (_) {
+      // 忽略
+    }
+  }
+
   static final Uint8List _propfindBody = Uint8List.fromList(utf8.encode(
     '<?xml version="1.0" encoding="utf-8"?>\n'
     '<D:propfind xmlns:D="DAV:"><D:prop>'
@@ -161,10 +170,15 @@ class WebDavClient {
       }
     } on TimeoutException {
       final expected = total >= 0 ? total.toString() : '未知';
+      _quietDelete(dest);
       throw WebDavException('下载不完整：已接收 $done/$expected 字节（超时）');
     } catch (e) {
-      if (e is WebDavException) rethrow;
+      if (e is WebDavException) {
+        _quietDelete(dest);
+        rethrow;
+      }
       final expected = total >= 0 ? total.toString() : '未知';
+      _quietDelete(dest);
       throw WebDavException(
         '下载不完整：已接收 $done/$expected 字节（连接中断或被服务端打断）',
         e,
@@ -174,6 +188,7 @@ class WebDavClient {
     }
     onProgress?.call(done, done);
     if (total >= 0 && done != total) {
+      _quietDelete(dest);
       throw WebDavException('下载不完整：$done/$total 字节');
     }
     return done;
@@ -201,12 +216,33 @@ class WebDavClient {
   }
 
   /// 探测是否支持 Range（不支持时返回 false）。
+  ///
+  /// 这里**不能**复用 [getRange]：服务器返回 200（忽略 Range）时 getRange 会把
+  /// 整个响应用 `drain()` 读完 —— 一个 2 GB 的文件先白读一遍，紧接着降级逻辑
+  /// 又整档下载一遍。探测只需要状态码：206 为支持，200 直接断开连接。
   Future<bool> supportsRange(String url) async {
     try {
-      await getRange(url, 0, 0);
-      return true;
-    } on RangeNotSupportedException {
+      final r = await _send('GET', url, headers: const {'Range': 'bytes=0-0'});
+      if (r.status == 206) {
+        await _readLimited(r.response, 1);
+        return true;
+      }
+      await _abortResponse(r.response);
       return false;
+    } on WebDavException {
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 不读响应体，直接断开（避免为了「看一眼状态码」把几 GB 文件拖下来）。
+  Future<void> _abortResponse(HttpClientResponse response) async {
+    try {
+      final socket = await response.detachSocket();
+      socket.destroy();
+    } catch (_) {
+      // 已经读完 / 无法 detach：尽力而为
     }
   }
 
@@ -392,7 +428,7 @@ class WebDavClient {
           request.headers.contentLength = 0;
         }
 
-        final response = await request.close().timeout(connectTimeout);
+        final response = await request.close().timeout(readTimeout);
         final status = response.statusCode;
 
         // 重定向：同方法重发（HttpClient 默认只跟随 GET/HEAD，这里统一处理）

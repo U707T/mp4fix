@@ -12,7 +12,7 @@ class SettingsPage extends StatelessWidget {
   const SettingsPage({super.key});
 
   /// 与 pubspec.yaml 的 version 保持一致。
-  static const String appVersion = '2.9.3';
+  static const String appVersion = '2.9.4';
 
   @override
   Widget build(BuildContext context) {

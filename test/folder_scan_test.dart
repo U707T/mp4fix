@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mp4fix/src/app/app_controller.dart';
 import 'package:mp4fix/src/app/engine_tasks.dart';
 import 'package:mp4fix/src/app/models.dart';
 
@@ -39,5 +40,25 @@ void main() {
     expect(normalizePickedPath('"/tmp/mp4fix"'), '/tmp/mp4fix');
     expect(normalizePickedPath('file:///tmp/mp4fix'), isNot(contains('file:')));
     expect(normalizePickedPath('/tmp/正常路径'), '/tmp/正常路径');
+  });
+
+  test('没选输入文件夹就扫描：报错但不丢已有列表', () async {
+    final controller = AppController();
+    controller.jobs.add(
+      FixJob(
+        id: 'keep-me',
+        source: JobSource.folder,
+        name: 'a.mp4',
+        displayPath: 'a.mp4',
+        size: 10,
+      ),
+    );
+
+    await expectLater(controller.scanFolder(), throwsA(isA<StateError>()));
+    expect(
+      controller.jobs.length,
+      1,
+      reason: '校验失败必须发生在 clearJobs 之前',
+    );
   });
 }

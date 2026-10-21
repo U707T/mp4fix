@@ -602,9 +602,16 @@ class AppSettings {
   };
 
   static AppSettings fromJson(Map<String, Object?> json) => AppSettings(
-    thresholdMb: json['thresholdMb'] as int? ?? AppDefaults.thresholdMb,
-    thresholdSeconds: (json['thresholdSeconds'] as num?)?.toDouble() ??
-        AppDefaults.thresholdSeconds,
+    // 读文件时做一次范围收敛：手改 / 旧版本写坏的 JSON 不应该让应用
+    // 一次起 100 个 Isolate（UI 里最多只能选 4）。
+    thresholdMb: ((json['thresholdMb'] as num?)?.toInt() ??
+            AppDefaults.thresholdMb)
+        .clamp(0, 64)
+        .toInt(),
+    thresholdSeconds: ((json['thresholdSeconds'] as num?)?.toDouble() ??
+            AppDefaults.thresholdSeconds)
+        .clamp(0.0, 60.0)
+        .toDouble(),
     includeOptimizable: json['includeOptimizable'] as bool? ?? false,
     themeMode: ThemeMode.values.firstWhere(
       (m) => m.name == json['themeMode'],
@@ -617,7 +624,9 @@ class AppSettings {
     rememberWebDavPassword: json['rememberWebDavPassword'] as bool? ?? false,
     webDavPassword: json['webDavPassword'] as String? ?? '',
     reuseRepairs: json['reuseRepairs'] as bool? ?? true,
-    parallelism: (json['parallelism'] as num?)?.toInt() ?? 0,
+    parallelism: ((json['parallelism'] as num?)?.toInt() ?? 0)
+        .clamp(0, 4)
+        .toInt(),
     nameMode: OutputNameMode.values.firstWhere(
       (m) => m.name == json['nameMode'],
       orElse: () => OutputNameMode.original,

@@ -117,7 +117,7 @@ class _WebDavPageState extends State<WebDavPage> {
         itemCount: jobs.isEmpty ? 1 : jobs.length + 1,
         itemBuilder: (context, index) {
           if (index > 0) return JobTile(job: jobs[index - 1]);
-          return _buildHeader(context, controller, all, busy, canRun);
+          return _buildHeader(context, controller, all, jobs, busy, canRun);
         },
       ),
     );
@@ -127,14 +127,16 @@ class _WebDavPageState extends State<WebDavPage> {
     BuildContext context,
     AppController controller,
     List<FixJob> all,
+    /// 已按当前筛选过滤好的列表（外层 build 算过一次，别重复算）。
+    List<FixJob> visible,
     bool busy,
     bool canRun,
   ) {
     final scheme = Theme.of(context).colorScheme;
     final cfg = controller.settings.webdav;
     final copyExample = controller.settings.applyOutputName('示例.mp4');
-    final jobs =
-        all.where((j) => _filter.matches(j.status)).toList(growable: false);
+    // 一次算完：按钮计数与「是否显示按钮」共用，别再各扫一遍全表。
+    final fixable = controller.fixableCount(JobSource.webdav);
 
     return Column(
       children: [
@@ -416,8 +418,8 @@ class _WebDavPageState extends State<WebDavPage> {
           jobs: all,
           active: busy ? controller.batchDone : null,
           total: busy ? controller.batchTotal : null,
-          fixableCount: controller.fixableCount(JobSource.webdav),
-          onFixAll: canRun && controller.hasFixable(JobSource.webdav)
+          fixableCount: fixable,
+          onFixAll: canRun && fixable > 0
               ? () => _guard(() => controller.fixWebDavJobs())
               : null,
           onProcessAll:
@@ -435,7 +437,7 @@ class _WebDavPageState extends State<WebDavPage> {
                   '几 GB 的文件通常只需几百 KB 流量。',
             ),
           )
-        else if (jobs.isEmpty)
+        else if (visible.isEmpty)
           const Padding(
             padding: EdgeInsets.only(top: 32),
             child: EmptyHint(

@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'binary.dart';
 import 'boxes.dart';
 import 'mp4_fragments.dart';
+import 'sample_tables.dart';
 import 'seekable_input.dart';
 
 /// 修复统计。
@@ -229,7 +230,12 @@ class Mp4Repair {
     // 写出：ftyp + moov + mdat
     _output.write(ftyp);
     _output.write(moovOut);
-    final mdatHeaderLen = _writeMdatHeader(payloadBytes);
+    // ★ 头部长度必须与上面布局时的假设完全一致：
+    //   co64 分支按「ftyp + moov + 16 字节大头部」计算 mdatStart，如果这里
+    //   因为 payloadBytes+8 仍放得下 32 位而写出 8 字节头部，实际数据就会比
+    //   moov 里的 stco/co64 偏移**早 8 字节** —— 每个样本都错位，产物静默损坏
+    //   （约 4 GiB 的文件最容易踩到：payload 刚好放得下、moov 把它顶过 4 GiB）。
+    final mdatHeaderLen = _writeMdatHeader(payloadBytes, large: useCo64);
 
     final copyBuf = Uint8List(_copyBufSize);
     var processed = 0;
@@ -273,7 +279,7 @@ class Mp4Repair {
     _output.flush();
 
     return RepairStats(
-      trackCount: tracks.length,
+      trackCount: tracks.where((t) => t.sizes.isNotEmpty).length,
       outputChunks: order.length,
       payloadBytes: payloadBytes,
       outputBytes: ftyp.length + moovOut.length + mdatHeaderLen + payloadBytes,
@@ -670,19 +676,19 @@ class Mp4Repair {
       final raw = readBytes(_input, b.start, b.size);
       switch (b.type) {
         case 'stsc':
-          stscEntries = _parseStsc(raw);
+          stscEntries = parseStsc(raw);
           if (recordParts) t.stblParts.add(const _StblPart.stsc());
         case 'stco':
-          chunkOffsets = _parseStco(raw, is64: false);
+          chunkOffsets = parseStco(raw, is64: false);
           if (recordParts) t.stblParts.add(const _StblPart.offsets());
         case 'co64':
-          chunkOffsets = _parseStco(raw, is64: true);
+          chunkOffsets = parseStco(raw, is64: true);
           if (recordParts) t.stblParts.add(const _StblPart.offsets());
         case 'stsz':
-          sizes = _parseStsz(raw);
+          sizes = parseStsz(raw);
           if (recordParts) t.stblParts.add(_StblPart.raw(raw));
         case 'stts':
-          final e = _parseStts(raw);
+          final e = parseStts(raw);
           sttsCounts = e.counts;
           sttsDeltas = e.deltas;
           if (recordParts) t.stblParts.add(_StblPart.raw(raw));
@@ -735,7 +741,13 @@ class Mp4Repair {
       final d = stsc[e][2];
       var o = offs[ci];
       for (var k = 0; k < spc; k++) {
-        if (s >= n) throw RepairException('stsc/stco 与实际样本数不一致');
+        if (s >= n) {
+          // 末块声明多于实际样本：流式录制 / 被截断的文件很常见，
+          // 多出来的几个样本号没有数据可指 —— 截断即可，不必判整份文件损坏。
+          // 非末块出现同样情况才是真的表结构错乱，仍然报错。
+          if (ci == offs.length - 1) break;
+          throw RepairException('stsc/stco 与实际样本数不一致');
+        }
         srcOff[s] = o;
         desc[s] = d;
         o += sz[s];
@@ -760,70 +772,6 @@ class Mp4Repair {
     t.descIdx = desc;
   }
 
-  List<List<int>> _parseStsc(Uint8List raw) {
-    if (raw.length < 16) throw RepairException('stsc 盒过小（疑似损坏）');
-    final cnt = u32AsInt(raw, 12);
-    if (cnt <= 0) throw RepairException('stsc 表为空');
-    checkTableFits(raw, cnt, 12, 16, 'stsc');
-    final out = List<List<int>>.generate(cnt, (_) => List<int>.filled(3, 0));
-    var p = 16;
-    for (var i = 0; i < cnt; i++) {
-      out[i][0] = u32(raw, p);
-      out[i][1] = u32(raw, p + 4);
-      out[i][2] = u32(raw, p + 8);
-      p += 12;
-    }
-    for (var i = 1; i < cnt; i++) {
-      if (out[i][0] <= out[i - 1][0]) throw RepairException('stsc 表异常');
-    }
-    return out;
-  }
-
-  List<int> _parseStco(Uint8List raw, {required bool is64}) {
-    if (raw.length < 16) throw RepairException('stco 盒过小（疑似损坏）');
-    final cnt = u32AsInt(raw, 12);
-    checkTableFits(raw, cnt, is64 ? 8 : 4, 16, is64 ? 'co64' : 'stco');
-    final out = List<int>.filled(cnt, 0);
-    var p = 16;
-    for (var i = 0; i < cnt; i++) {
-      out[i] = is64 ? u64(raw, p) : u32(raw, p);
-      p += is64 ? 8 : 4;
-    }
-    return out;
-  }
-
-  List<int> _parseStsz(Uint8List raw) {
-    if (raw.length < 20) throw RepairException('stsz 盒过小（疑似损坏）');
-    final uniform = u32(raw, 12);
-    final cnt = u32AsInt(raw, 16);
-    if (uniform == 0) checkTableFits(raw, cnt, 4, 20, 'stsz');
-    final out = List<int>.filled(cnt, 0);
-    if (uniform != 0) {
-      out.fillRange(0, cnt, uniform);
-    } else {
-      var p = 20;
-      for (var i = 0; i < cnt; i++) {
-        out[i] = u32(raw, p);
-        p += 4;
-      }
-    }
-    return out;
-  }
-
-  ({List<int> counts, List<int> deltas}) _parseStts(Uint8List raw) {
-    if (raw.length < 16) throw RepairException('stts 盒过小（疑似损坏）');
-    final cnt = u32AsInt(raw, 12);
-    checkTableFits(raw, cnt, 8, 16, 'stts');
-    final counts = List<int>.filled(cnt, 0);
-    final deltas = List<int>.filled(cnt, 0);
-    var p = 16;
-    for (var i = 0; i < cnt; i++) {
-      counts[i] = u32(raw, p);
-      deltas[i] = u32(raw, p + 4);
-      p += 8;
-    }
-    return (counts: counts, deltas: deltas);
-  }
 
   // ---------------------------------------------------------------- chunking
 
@@ -873,6 +821,11 @@ class Mp4Repair {
   }) {
     final parts = <Uint8List>[_mvhdRaw!];
     for (final t in tracks) {
+      // 空轨道（分片文件里没有对应 moof 的轨）不写出去：
+      // stsc 的 entry_count 必须 ≥ 1、stts 也不接受 0 条，硬写只会得到一个
+      // 结构非法的 stbl（ffmpeg 能忍，QuickTime / 硬件播放器不一定）。
+      // 这些轨道本来就没有任何样本，去掉不丢数据。
+      if (t.sizes.isEmpty) continue;
       parts.add(_buildTrak(t, useCo64: useCo64, dummy: dummy));
     }
     return _boxBytes('moov', _concat(parts));
@@ -1170,8 +1123,20 @@ class Mp4Repair {
     return out;
   }
 
-  int _writeMdatHeader(int payloadBytes) {
-    if (payloadBytes + 8 <= _u32Max) {
+  /// mdat 头部长度：与布局时的偏移基准同源，**不要**再用「payload 是否放得下
+  /// 32 位」单独判断。
+  ///
+  /// - 普通布局（stco）：8 字节头部；
+  /// - co64 布局：16 字节（64 位 largesize）头部，即使 payload 本身不足 4 GiB。
+  static int mdatHeaderLength({required bool useCo64}) => useCo64 ? 16 : 8;
+
+  int _writeMdatHeader(int payloadBytes, {required bool large}) {
+    if (!large) {
+      if (payloadBytes + 8 > _u32Max) {
+        // 布局说 8 字节、实际又需要 16 字节 —— 这会让所有样本偏移错位，
+        // 宁可直接失败也不要写出一个"能解析但数据全错"的文件。
+        throw StateError('内部错误：mdat 头部长度与偏移布局不一致');
+      }
       final hdr = Uint8List(8);
       putU32(hdr, 0, payloadBytes + 8);
       hdr.setRange(4, 8, asciiBytes('mdat'));
